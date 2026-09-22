@@ -505,7 +505,7 @@ end
     File.open(File.join(@tmp, "sweep.lock"), File::RDWR | File::CREAT) do |lock|
       lock.flock(File::LOCK_EX)
       out, status = sweep
-      assert_equal 0, status, out
+      assert_equal 1, status, out
       assert_match(/another sweep-worktrees run/, out)
     end
     assert File.exist?(path)

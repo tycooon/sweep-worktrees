@@ -13,19 +13,33 @@ module SweepWorktrees
   # Runs external commands without a shell. LC_ALL=C keeps git's messages matchable.
   module Command
     ENV_OVERRIDES = { "LC_ALL" => "C" }.freeze
+    # A stalled network call or hook must not hold the lock forever. A command past its
+    # deadline reads as failed, which every caller already treats as "keep".
+    TIMEOUT = 600
 
     module_function
 
-    def run(*, chdir: nil, merge_err: false)
-      opts = chdir ? { chdir: chdir } : {}
-      if merge_err
-        out, status = Open3.capture2e(ENV_OVERRIDES, *, **opts)
-        Result.new(out, "", status)
-      else
-        Result.new(*Open3.capture3(ENV_OVERRIDES, *, **opts))
+    def run(*args, chdir: nil, merge_err: false, timeout: TIMEOUT)
+      opts = { pgroup: true }
+      opts[:chdir] = chdir if chdir
+      Open3.public_send(merge_err ? :popen2e : :popen3, ENV_OVERRIDES, *args, **opts) do |stdin, *pipes, wait|
+        stdin.close
+        readers = pipes.map { |pipe| Thread.new { pipe.read } }
+        finished = wait.join(timeout)
+        kill_group(wait.pid) unless finished
+        out, err = readers.map(&:value)
+        next Result.new(out, "timed out after #{timeout}s", nil) unless finished
+
+        Result.new(out, err.to_s, wait.value)
       end
     rescue SystemCallError => error
       Result.new("", error.message, nil)
+    end
+
+    def kill_group(pid)
+      Process.kill("KILL", -pid)
+    rescue SystemCallError
+      nil
     end
 
     def git(dir, *) = run("git", "-C", dir, *)

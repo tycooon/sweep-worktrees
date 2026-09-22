@@ -30,7 +30,8 @@ module SweepWorktrees
 
     module_function
 
-    # Exit code: 0 clean, 1 when anything warned, 2 on bad usage or config.
+    # Exit code: 0 clean, 1 when anything warned or another run holds the lock,
+    # 2 on bad usage or config.
     def run(argv, io: $stdout)
       options = parse(argv)
       config = Config.load(options[:config])
@@ -63,7 +64,7 @@ module SweepWorktrees
       File.open(path, File::RDWR | File::CREAT, 0o644) do |file|
         unless file.flock(File::LOCK_EX | File::LOCK_NB)
           io.puts("another sweep-worktrees run holds #{path}; exiting")
-          return 0
+          return 1
         end
         yield
       end

@@ -10,6 +10,8 @@ module SweepWorktrees
     class Refused < StandardError
     end
 
+    HOOK_TIMEOUT = 3600
+
     attr_reader :counts
 
     # recheck: callable(facts, repo, prs) returning a reason to stop, or nil.
@@ -70,7 +72,7 @@ module SweepWorktrees
       args = Shellwords.split(command)
       args[0] = File.expand_path(args[0], repo_dir) if args[0].include?("/")
       args << "--dry-run" if @dry_run
-      res = Command.run(*args, chdir: repo_dir, merge_err: true)
+      res = Command.run(*args, chdir: repo_dir, merge_err: true, timeout: HOOK_TIMEOUT)
       res.out.each_line { |line| @log.info("[hook #{File.basename(repo_dir)}] #{line.chomp}") }
       return if res.ok?
 
