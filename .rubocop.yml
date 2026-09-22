@@ -1,0 +1,17 @@
+inherit_gem:
+  rubocop-config-umbrellio: lib/rubocop.yml
+
+AllCops:
+  DisplayCopNames: true
+  SuggestExtensions: false
+  TargetRubyVersion: 3.3
+  Include:
+    - bin/sweep-worktrees
+    - Gemfile
+    - Rakefile
+    - lib/**/*
+    - test/**/*
+
+Metrics/MethodLength:
+  Exclude:
+    - test/**/*

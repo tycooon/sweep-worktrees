@@ -1,0 +1,15 @@
+# frozen_string_literal: true
+
+require_relative "sweep_worktrees/command"
+require_relative "sweep_worktrees/config"
+require_relative "sweep_worktrees/forge"
+require_relative "sweep_worktrees/app_registry"
+require_relative "sweep_worktrees/processes"
+require_relative "sweep_worktrees/discovery"
+require_relative "sweep_worktrees/repo"
+require_relative "sweep_worktrees/facts"
+require_relative "sweep_worktrees/rules"
+require_relative "sweep_worktrees/salvage"
+require_relative "sweep_worktrees/actions"
+require_relative "sweep_worktrees/sweep"
+require_relative "sweep_worktrees/cli"

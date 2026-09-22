@@ -1,0 +1,11 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# launchd starts jobs without a locale, and Ruby would then read every command's output as
+# US-ASCII; gh and glab answer in UTF-8.
+Encoding.default_external = Encoding::UTF_8
+
+require_relative "../lib/sweep_worktrees"
+
+$stdout.sync = true
+exit SweepWorktrees::CLI.run(ARGV)
