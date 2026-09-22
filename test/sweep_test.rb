@@ -75,8 +75,8 @@ class SweepTest < Minitest::Test
     File.write(@config, YAML.dump(settings.merge(extra.transform_keys(&:to_s))))
   end
 
-  def sweep(*)
-    env = { "PATH" => "#{@bin}:#{ENV.fetch('PATH')}", "FIXTURES" => @fixtures }
+  def sweep(*, env: {})
+    env = { "PATH" => "#{@bin}:#{ENV.fetch('PATH')}", "FIXTURES" => @fixtures }.merge(env)
     out, status = Open3.capture2e(env, "ruby", BIN, "--config", @config, *, chdir: @tmp)
     [out, status.exitstatus]
   end
@@ -282,6 +282,55 @@ class SweepTest < Minitest::Test
 
     assert_equal 0, status, out
     refute File.exist?(path), out
+  end
+
+  def test_a_staged_submodule_bump_keeps_the_checkout
+    path = add_worktree_with_submodule(@main, "sub-bump")
+    commit(File.join(path, "dep"), "inside.txt")
+    git(path, "add", "dep")
+    age(path, 12)
+    github("acme/proj", [pull_request(6, :merged, git(path, "rev-parse", "HEAD"))])
+
+    out, status = sweep("--verbose")
+
+    assert_equal 0, status, out
+    assert File.exist?(path), out
+    assert_empty tarballs
+    assert_includes out, "changes inside submodules dep"
+  end
+
+  def test_a_run_without_a_locale_reads_non_ascii_forge_output
+    path, head = add_worktree(@main, "unicode")
+    github("acme/proj", [pull_request(1, :merged, head, branch: "claude/тест")])
+    no_locale = ENV.keys.grep(/\A(?:LANG|LC_\w+)\z/).to_h { |key| [key, nil] }
+
+    out, status = sweep(env: no_locale)
+
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+  end
+
+  def test_local_env_files_keep_a_worktree_unless_they_match_the_main_checkout
+    File.write(File.join(@main, ".git", "info", "exclude"), "mise.toml\n.env\n")
+    File.write(File.join(@main, "mise.toml"), "[env]\nA = 1\n")
+    same, same_head = add_worktree(@main, "same")
+    File.write(File.join(same, "mise.toml"), "[env]\nA = 1\n")
+    changed, changed_head = add_worktree(@main, "changed")
+    File.write(File.join(changed, "mise.toml"), "[env]\nA = 1\nB = 2\n")
+    extra, extra_head = add_worktree(@main, "extra")
+    File.write(File.join(extra, ".env"), "TOKEN=local\n")
+    prs = [pull_request(1, :merged, same_head), pull_request(2, :merged, changed_head),
+           pull_request(3, :merged, extra_head)]
+    github("acme/proj", prs)
+
+    out, status = sweep("--verbose")
+
+    assert_equal 0, status, out
+    refute File.exist?(same), out
+    assert File.exist?(changed), out
+    assert File.exist?(extra), out
+    assert_includes out, "local mise.toml"
+    assert_includes out, "local .env"
   end
 
   def test_a_worktree_dirty_inside_a_submodule_is_kept_unsalvaged

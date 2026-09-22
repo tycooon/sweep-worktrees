@@ -13,7 +13,7 @@ It looks at every checkout one or two levels under the root: `<root>/<project>/<
 | Open PR/MR | keep |
 | Merged, clean | remove, delete the branch |
 | Detached review checkout of a merged or closed PR/MR, clean | remove |
-| Merged, dirty inside a submodule | keep: a tarball can't hold submodule changes |
+| Merged, with changes inside a submodule or a staged submodule bump | keep: a tarball can't hold a submodule's own commits or changes |
 | Merged, dirty, idle for 7+ days | save leftovers to a tarball, remove, delete the branch |
 | Closed or no PR/MR, clean, idle for 14+ days | remove the folder, keep the branch unless it's already in the default branch |
 | Any other dirty checkout | keep; flagged in the summary once idle for 30+ days |
@@ -35,6 +35,7 @@ Before a repository's worktrees are judged, any that moved within the root are r
 - A checkout with a `.worktree-keep` file in its root, or one locked with `git worktree lock`.
 - A detached HEAD whose commit is on no ref and belongs to no PR/MR.
 - A checkout that has other checkouts inside it (submodules aside).
+- A worktree whose git-ignored `.env`, `.envrc` or mise config differs from the main checkout's copy, since a tarball never holds ignored files. It is flagged in the summary once idle for 30+ days.
 - Anything whose state it could not read.
 
 Every guard is checked again right before each deletion, and a checkout that changed in the meantime is left alone. If `lsof` fails or the desktop app's registry can't be parsed, the run deletes nothing at all.

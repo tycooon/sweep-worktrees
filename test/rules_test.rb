@@ -10,7 +10,7 @@ class RulesTest < Minitest::Test
     app_reserved: nil, keep_file: false, locked: false, head: HEAD, branch: "claude/wt", dirt: "",
     dirty: false, idle_days: 0.0, plans: false, forge_ok: true, pr: nil, head_known: false,
     head_on_ref: true, head_in_default: false,
-    submodule_dirt: [], nested_checkouts: []
+    submodule_dirt: [], nested_checkouts: [], local_env_files: []
   }.freeze
   DIRTY = { dirty: true, dirt: "?? x\n" }.freeze
   CLONE = { kind: :clone, hosted_worktrees: 0, stash_count: 0, unpushed_refs: [],
@@ -35,6 +35,13 @@ class RulesTest < Minitest::Test
     "merged dirty inside a submodule stays however idle" => [
       { pr: :merged, **DIRTY, idle_days: 40.0,
         submodule_dirt: ["lib/dep"] }, { action: :keep, tag: :dirty, attention: true }
+    ],
+    "a local env file keeps a merged clean worktree" => [
+      { pr: :merged, local_env_files: ["mise.toml"] }, { action: :keep, tag: :dirty }
+    ],
+    "a local env file keeps an idle unmerged worktree, flagged" => [
+      { idle_days: 40.0, local_env_files: [".env"] },
+      { action: :keep, tag: :dirty, attention: true },
     ],
     "hosting a nested checkout guards" => [{ pr: :merged, nested_checkouts: ["wt"] },
                                            { action: :keep, tag: :guarded }],

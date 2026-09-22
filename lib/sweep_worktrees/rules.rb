@@ -17,7 +17,14 @@ module SweepWorktrees
       return keep(*guarded) if guarded
 
       decided = facts.forge_ok ? by_pull_request(facts, config) : fallback(facts, config)
-      clone_wait(facts, config, decided) || decided
+      clone_wait(facts, config, decided) || local_env(facts, config, decided) || decided
+    end
+
+    # A tarball never holds ignored files, so a local env file keeps the checkout instead.
+    def local_env(facts, config, decided)
+      return unless decided.remove? && facts.local_env_files&.any?
+
+      dirty(facts, config, "#{decided.reason}, local #{list(facts.local_env_files)}")
     end
 
     # Deleting a clone deletes its repository, so a clone always waits out the longer window.

@@ -9,7 +9,7 @@ module SweepWorktrees
     :locked, :head, :branch, :dirt, :dirty, :idle_days, :plans,
     :forge_ok, :pr, :head_known, :head_on_ref, :head_in_default,
     :submodule_dirt, :nested_checkouts,
-    :hosted_worktrees, :stash_count, :unpushed_refs, :precious_ignored,
+    :hosted_worktrees, :stash_count, :unpushed_refs, :precious_ignored, :local_env_files,
     keyword_init: true
   ) do
     def detached? = branch.nil?
@@ -39,6 +39,9 @@ module SweepWorktrees
     # Also common source folders (Helm charts, Go packages, packaging), so these count only
     # when git lists the folder itself as ignored.
     DISPOSABLE_WHEN_LISTED = %w[build charts pkg].freeze
+    # Ignored, so they are never dirt and never salvaged. Usually copied from the main
+    # checkout, but a copy that differs may hold keys found nowhere else.
+    LOCAL_ENV_FILES = %w[.env .envrc mise.toml .mise.toml mise.local.toml .mise.local.toml].freeze
 
     def initialize(registry:, processes:, idle_floor_days:, now: Time.now, cwd: Dir.pwd)
       @registry = registry
@@ -71,6 +74,7 @@ module SweepWorktrees
       match_pull_requests(facts, prs || [])
       facts.head_in_default = repo.in_default?(facts.head)
       clone_facts(facts, prs || []) if facts.kind == :clone
+      facts.local_env_files = local_env_files(facts.path, repo.dir) if facts.kind == :worktree
       facts
     rescue FactError, SystemCallError => error
       facts.error = error.message
@@ -122,9 +126,21 @@ module SweepWorktrees
       end
     end
 
+    def ignored_entries(path)
+      Command.git!(path, "ls-files", "--others", "--ignored", "--exclude-standard",
+                   "--directory", "-z").split("\0")
+    end
+
+    def local_env_files(path, main_dir)
+      files = ignored_entries(path).select { |rel| LOCAL_ENV_FILES.include?(File.basename(rel)) }
+      files.reject do |rel|
+        main = File.join(main_dir, rel)
+        File.file?(main) && File.binread(main) == File.binread(File.join(path, rel))
+      end
+    end
+
     def precious_ignored(path)
-      listing = Command.git!(path, "ls-files", "--others", "--ignored", "--exclude-standard",
-                             "--directory", "-z").split("\0")
+      listing = ignored_entries(path)
       junk_dirs = listing.select do |rel|
         rel.end_with?("/") && DISPOSABLE_WHEN_LISTED.include?(File.basename(rel))
       end
@@ -150,7 +166,8 @@ module SweepWorktrees
         count = V2_FIELDS[entry[0]] or next
         entries.shift if entry.start_with?("2 ") # a rename's original path is its own field
         fields = entry.split(" ", count)
-        changed << fields.last if fields[2].start_with?("S") && fields[2] != "S..."
+        # "S..." is a staged bump: its commit may live only in this checkout's submodule.
+        changed << fields.last if fields[2].start_with?("S")
       end
       changed
     end
