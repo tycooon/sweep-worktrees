@@ -135,7 +135,7 @@ module SweepWorktrees
       guarded = Rules.guard(fresh)
       return guarded.first if guarded
 
-      changed = %i[head branch dirt].any? { |key| fresh[key] != facts[key] }
+      changed = %i[head branch dirt local_env_files].any? { |key| fresh[key] != facts[key] }
       "it changed since it was checked" if changed
     rescue AppRegistry::Unreadable, Processes::Unavailable => error
       error.message

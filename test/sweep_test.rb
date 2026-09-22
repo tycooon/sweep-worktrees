@@ -442,6 +442,19 @@ class SweepTest < Minitest::Test
     assert_includes out, "kept #{path}: a process is running in it"
   end
 
+  def test_a_local_env_file_written_after_classification_keeps_the_worktree
+    File.write(File.join(@main, ".git", "info", "exclude"), ".env\n")
+    path, head = add_worktree(@main, "late-env")
+    github("acme/proj", [pull_request(1, :merged, head)])
+    File.write(File.join(@fixtures, "lsof.late.touch"), File.join(path, ".env"))
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert File.exist?(path), out
+    assert_includes out, "kept #{path}: it changed since it was checked"
+  end
+
   def test_a_worktree_that_changes_after_classification_is_kept
     path, head = add_worktree(@main, "moving")
     github("acme/proj", [pull_request(1, :merged, head)])
