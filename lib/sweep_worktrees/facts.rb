@@ -30,12 +30,15 @@ module SweepWorktrees
     # and agent state, and .plans/, which is salvaged first. Anything else (.env, local
     # databases, keys) keeps the clone.
     DISPOSABLE_IGNORED = %w[
-      node_modules vendor target build dist out pkg coverage tmp log logs charts
+      node_modules vendor target dist out coverage tmp log logs
       .venv venv __pycache__ .pytest_cache .mypy_cache .ruff_cache .tox .bundle .gradle
       .next .nuxt .cache .parcel-cache .turbo .terraform
       .DS_Store .idea .vscode .claude .codex .cursor .zed .superpowers .plans
     ].freeze
     DISPOSABLE_IGNORED_FILES = /\A(?:.+\.(?:pyc|log)|Gemfile\.lock)\z/
+    # Also common source folders (Helm charts, Go packages, packaging), so these count only
+    # when git lists the folder itself as ignored.
+    DISPOSABLE_WHEN_LISTED = %w[build charts pkg].freeze
 
     def initialize(registry:, processes:, idle_floor_days:, now: Time.now, cwd: Dir.pwd)
       @registry = registry
@@ -121,10 +124,14 @@ module SweepWorktrees
 
     def precious_ignored(path)
       listing = Command.git!(path, "ls-files", "--others", "--ignored", "--exclude-standard",
-                             "--directory", "-z")
-      listing.split("\0").reject do |rel|
+                             "--directory", "-z").split("\0")
+      junk_dirs = listing.select do |rel|
+        rel.end_with?("/") && DISPOSABLE_WHEN_LISTED.include?(File.basename(rel))
+      end
+      listing.reject do |rel|
         parts = rel.chomp("/").split("/")
-        parts.intersect?(DISPOSABLE_IGNORED) || DISPOSABLE_IGNORED_FILES.match?(parts.last)
+        parts.intersect?(DISPOSABLE_IGNORED) || DISPOSABLE_IGNORED_FILES.match?(parts.last) ||
+          junk_dirs.any? { |dir| rel.start_with?(dir) }
       end
     end
 

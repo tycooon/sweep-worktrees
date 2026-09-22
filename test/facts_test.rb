@@ -130,6 +130,24 @@ class FactsTest < Minitest::Test
     assert_equal [".env"], build_facts(clone, kind: :clone).precious_ignored
   end
 
+  def test_source_folders_named_like_build_output_still_count
+    clone = make_repo("app", dest: File.join(@root, "clone"))
+    %w[charts/app pkg/config build web].each do |dir|
+      FileUtils.mkdir_p(File.join(clone, dir))
+      commit(clone, "#{dir}/README")
+    end
+    File.write(File.join(clone, ".git", "info", "exclude"),
+               "*.local.yaml\n.env\ncharts/app/charts/\nweb/build/\n")
+    %w[charts/app/values.local.yaml pkg/config/settings.local.yaml build/.env
+       charts/app/charts/dep-1.0.tgz web/build/app.js].each do |rel|
+      FileUtils.mkdir_p(File.dirname(File.join(clone, rel)))
+      File.write(File.join(clone, rel), "x\n")
+    end
+
+    assert_equal %w[build/.env charts/app/values.local.yaml pkg/config/settings.local.yaml],
+                 build_facts(clone, kind: :clone).precious_ignored.sort
+  end
+
   def test_changes_inside_a_submodule_are_reported
     path = add_worktree_with_submodule(@main, "with-dep")
     assert_empty build_facts(path).submodule_dirt
