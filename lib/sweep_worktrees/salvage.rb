@@ -13,6 +13,13 @@ module SweepWorktrees
 
     MB = 1024 * 1024
     DAY = 86_400
+    TARBALL = /-\d{8}-\d{4}\.tar\.gz\z/
+    # `git diff` honors the user's diff config (external tools, textconv, prefixes, colors);
+    # a salvaged patch must stay a plain patch whatever that config says.
+    DIFF = %w[
+      diff --binary --no-ext-diff --no-textconv --no-color --no-relative --submodule=short
+      --src-prefix=a/ --dst-prefix=b/ HEAD
+    ].freeze
 
     def initialize(config, now: Time.now)
       @config = config
@@ -25,8 +32,7 @@ module SweepWorktrees
       untracked = untracked_files(path)
       plans = plans_files(path)
       check_size!(path, untracked, plans)
-      target = File.join(@config.salvage_dir, repo_name,
-                         "#{File.basename(path)}-#{@now.strftime('%Y%m%d-%H%M')}.tar.gz")
+      target = File.join(@config.salvage_dir, repo_name, "#{tarball_name(path)}.tar.gz")
       Dir.mktmpdir("sweep-salvage") do |stage|
         File.write(File.join(stage, "MANIFEST"), manifest(facts, repo_name, remote_url, reason))
         stage_changes(path, stage)
@@ -39,13 +45,20 @@ module SweepWorktrees
       raise Failed, error.message
     end
 
+    # Only tarballs this tool wrote, so a salvage_dir shared with other archives stays intact.
     def expired
       cutoff = @now - (@config.salvage_retention_days * DAY)
-      files = Dir.glob(File.join(@config.salvage_dir, "*", "*.tar.gz"))
+      files = Dir.glob(File.join(@config.salvage_dir, "*", "*.tar.gz")).grep(TARBALL)
       files.select { |file| File.mtime(file) < cutoff }.sort
     end
 
     private
+
+    # The path under the root keeps same-named checkouts of one repo apart within a run.
+    def tarball_name(path)
+      rel = path.delete_prefix("#{@config.worktrees_root}/").tr("/", "_")
+      "#{rel}-#{@now.strftime('%Y%m%d-%H%M')}"
+    end
 
     def untracked_files(path)
       listing = Command.git!(path, "ls-files", "--others", "--exclude-standard", "-z")
@@ -61,9 +74,15 @@ module SweepWorktrees
       raise Failed, "leftovers are #{(size.to_f / MB).ceil} MB, over the #{cap} MB cap"
     end
 
+    # A patch that doesn't reverse-apply to the checkout it came from would not restore it either.
     def stage_changes(path, stage)
-      patch = Command.git!(path, "diff", "--binary", "HEAD")
-      File.write(File.join(stage, "changes.patch"), patch) unless patch.empty?
+      patch = Command.git!(path, *DIFF)
+      return if patch.empty?
+
+      file = File.join(stage, "changes.patch")
+      File.write(file, patch)
+      check = Command.git(path, "apply", "--check", "--reverse", "--whitespace=nowarn", file)
+      raise Failed, "the patch does not apply back to the checkout: #{check.err.strip}" unless check.ok?
     end
 
     def plans_files(path)
@@ -101,7 +120,7 @@ module SweepWorktrees
       listed = Command.run("tar", "-tzf", tmp)
       raise Failed, "the tarball does not list back: #{listed.err.strip}" unless listed.ok?
 
-      File.rename(tmp, target)
+      File.link(tmp, target) # raises when the target exists: an earlier salvage is never replaced
     ensure
       FileUtils.rm_f(tmp) if tmp
     end
