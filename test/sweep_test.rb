@@ -1,0 +1,474 @@
+# frozen_string_literal: true
+
+require_relative "test_helper"
+
+class SweepTest < Minitest::Test
+  include TestHelper
+
+  BIN = File.expand_path("../bin/sweep-worktrees", __dir__)
+  FAKES = {
+    "gh" => <<~'RUBY',
+      #!/usr/bin/env ruby
+      if ARGV[0] == "api"
+        file = File.join(ENV.fetch("FIXTURES"), "gh-api-#{ARGV[1].tr('/', '_')}.json")
+        abort("gh: no fixture for #{ARGV[1]}") unless File.exist?(file)
+        print File.read(file)
+        exit
+      end
+      repo = ARGV[ARGV.index("--repo") + 1]
+      file = File.join(ENV.fetch("FIXTURES"), "gh-#{repo.tr('/', '_')}.json")
+      abort("gh: no fixture for #{repo}") unless File.exist?(file)
+      print File.read(file)
+    RUBY
+    "glab" => <<~'RUBY',
+      #!/usr/bin/env ruby
+      require "uri"
+      path = ARGV.find { |arg| arg.start_with?("projects/") }
+      project = URI.decode_www_form_component(path[%r{\Aprojects/([^/]+)/}, 1])
+      file = File.join(ENV.fetch("FIXTURES"), "glab-#{project.tr('/', '_')}.json")
+      abort("glab: no fixture for #{project}") unless File.exist?(file)
+      print(path.match?(/[?&]page=1\z/) ? File.read(file) : "[]")
+    RUBY
+    # The first call is the classification snapshot; later calls are the re-checks
+    # before each action.
+    "lsof" => <<~'RUBY',
+      #!/usr/bin/env ruby
+      dir = ENV.fetch("FIXTURES")
+      abort("lsof: failing on purpose") if File.exist?(File.join(dir, "lsof.fail"))
+      calls = File.join(dir, "lsof.calls")
+      count = File.exist?(calls) ? File.read(calls).to_i + 1 : 1
+      File.write(calls, count)
+      touch = File.join(dir, "lsof.late.touch")
+      File.write(File.read(touch).strip, "late\n") if count == 2 && File.exist?(touch)
+      files = [File.join(dir, "lsof.txt")]
+      files << File.join(dir, "lsof.late.txt") if count > 1
+      files.each { |file| print File.read(file) if File.exist?(file) }
+    RUBY
+  }.freeze
+
+  def setup
+    super
+    @fixtures = File.join(@tmp, "fixtures")
+    @bin = File.join(@tmp, "bin")
+    FileUtils.mkdir_p([@fixtures, @bin])
+    FAKES.each do |name, source|
+      File.write(File.join(@bin, name), source)
+      File.chmod(0o755, File.join(@bin, name))
+    end
+    @main = make_repo("proj")
+    write_config
+  end
+
+  def write_config(**extra)
+    @config = File.join(@tmp, "config.yml")
+    settings = {
+      "worktrees_root" => @root,
+      "salvage_dir" => File.join(@tmp, "salvage"),
+      "app_registry" => File.join(@tmp, "registry.json"),
+      "lock_file" => File.join(@tmp, "sweep.lock"),
+    }
+    File.write(@config, YAML.dump(settings.merge(extra.transform_keys(&:to_s))))
+  end
+
+  def sweep(*)
+    env = { "PATH" => "#{@bin}:#{ENV.fetch('PATH')}", "FIXTURES" => @fixtures }
+    out, status = Open3.capture2e(env, "ruby", BIN, "--config", @config, *, chdir: @tmp)
+    [out, status.exitstatus]
+  end
+
+  def github(slug, prs)
+    data = prs.map do |pr|
+      { "number" => pr.number, "state" => pr.state.to_s.upcase, "headRefOid" => pr.head_sha,
+        "headRefName" => pr.source_branch, "url" => pr.url }
+    end
+    File.write(File.join(@fixtures, "gh-#{slug.tr('/', '_')}.json"), JSON.generate(data))
+  end
+
+  def gitlab(project, prs)
+    states = { open: "opened", merged: "merged", closed: "closed" }
+    data = prs.map do |pr|
+      { "iid" => pr.number, "state" => states.fetch(pr.state), "sha" => pr.head_sha,
+        "source_branch" => pr.source_branch, "web_url" => pr.url }
+    end
+    File.write(File.join(@fixtures, "glab-#{project.tr('/', '_')}.json"), JSON.generate(data))
+  end
+
+  def occupy(path) = File.write(File.join(@fixtures, "lsof.txt"), "p1\nn#{path}\n", mode: "a")
+
+  def registry(pooled: [])
+    worktrees = pooled.to_h { |path| [File.basename(path), { "path" => path, "leasedBy" => nil }] }
+    File.write(File.join(@tmp, "registry.json"),
+               JSON.generate("schemaVersion" => 2, "worktrees" => worktrees))
+  end
+
+  def branch?(repo,
+              name)
+    system("git", "-C", repo, "show-ref", "--verify", "--quiet",
+           "refs/heads/#{name}")
+  end
+
+  def tarballs = Dir.glob(File.join(@tmp, "salvage", "*", "*.tar.gz"))
+
+  def listing(tarball) = sh!("tar", "-tzf", tarball).lines.map(&:chomp)
+
+  def test_a_merged_clean_worktree_goes_with_its_branch
+    path, head = add_worktree(@main, "done")
+    github("acme/proj", [pull_request(1, :merged, head, branch: "claude/done")])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+    refute branch?(@main, "claude/done")
+    assert_match(/removed 1, /, out)
+  end
+
+  def test_an_open_pr_keeps_even_an_idle_worktree
+    path, = add_worktree(@main, "wip")
+    age(path, 40)
+    github("acme/proj", [pull_request(2, :open, "0" * 40, branch: "claude/wip")])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert File.exist?(path), out
+  end
+
+  def test_dry_run_changes_nothing_and_passes_the_flag_to_hooks
+    path, head = add_worktree(@main, "done")
+    github("acme/proj", [pull_request(1, :merged, head)])
+    File.write(File.join(@main, "hook"), "#!/bin/sh\necho \"hook args: $*\"\n")
+    File.chmod(0o755, File.join(@main, "hook"))
+    write_config(hooks: { @main => "./hook" })
+
+    out, status = sweep("--dry-run")
+
+    assert_equal 0, status, out
+    assert File.exist?(path), out
+    assert branch?(@main, "claude/done")
+    assert_match(/DRY-RUN: remove #{Regexp.escape(path)}/, out)
+    assert_match(/\[hook proj\] hook args: --dry-run/, out)
+  end
+
+  def test_a_worktree_without_a_pr_waits_for_the_idle_window_then_goes_keeping_its_branch
+    fresh, = add_worktree(@main, "fresh")
+    stale, = add_worktree(@main, "stale")
+    age(stale, 20)
+    github("acme/proj", [])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert File.exist?(fresh), out
+    refute File.exist?(stale), out
+    assert branch?(@main, "claude/stale"), "the branch of unmerged work must survive"
+  end
+
+  def test_guards_keep_live_pooled_marked_and_locked_worktrees
+    worktrees = %w[live pooled marked locked].to_h { |name| [name, add_worktree(@main, name)] }
+    github("acme/proj", worktrees.values.each_with_index.map do |(_, head), i|
+      pull_request(i + 1, :merged, head)
+    end)
+    occupy(worktrees["live"][0])
+    registry(pooled: [worktrees["pooled"][0]])
+    FileUtils.touch(File.join(worktrees["marked"][0], ".worktree-keep"))
+    git(@main, "worktree", "lock", worktrees["locked"][0])
+    reasons = { "live" => "a process is running in it", "pooled" => "pooled by the desktop app",
+                "marked" => ".worktree-keep", "locked" => "locked" }
+
+    out, status = sweep("--verbose")
+
+    assert_equal 0, status, out
+    worktrees.each do |name, (path, _)|
+      assert File.exist?(path), "#{path} should stay:\n#{out}"
+      assert_includes out, "keep #{path}: #{reasons.fetch(name)}"
+    end
+  end
+
+  def test_a_dirty_merged_worktree_is_salvaged_once_idle
+    path, head = add_worktree(@main, "leftovers")
+    File.write(File.join(path, "README"), "edited\n")
+    File.write(File.join(path, "scratch.txt"), "notes\n")
+    FileUtils.mkdir_p(File.join(path, ".plans"))
+    File.write(File.join(path, ".plans", "design.md"), "# design\n")
+    age(path, 8)
+    github("acme/proj", [pull_request(3, :merged, head)])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+    assert_equal 1, tarballs.size, out
+    entries = listing(tarballs.first)
+    %w[./MANIFEST ./changes.patch ./untracked/scratch.txt ./plans/design.md].each do |entry|
+      assert_includes entries, entry
+    end
+    assert_includes sh!("tar", "-xOzf", tarballs.first, "./MANIFEST"), "head: #{head}"
+  end
+
+  def test_a_merged_pr_older_than_the_capped_list_is_found_by_its_commit
+    path, head = add_worktree(@main, "old")
+    File.write(File.join(path, "scratch.txt"), "notes\n")
+    age(path, 30)
+    github("acme/proj", [])
+    merged = { "number" => 7, "state" => "closed", "merged_at" => "2026-06-01T00:00:00Z",
+               "head" => { "sha" => head, "ref" => "claude/old" },
+               "html_url" => "https://example.com/pr/7" }
+    File.write(File.join(@fixtures, "gh-api-repos_acme_proj_commits_#{head}_pulls.json"),
+               JSON.generate([merged]))
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+    assert_equal 1, tarballs.size, out
+    refute branch?(@main, "claude/old")
+  end
+
+  def test_a_dirty_merged_worktree_waits_under_the_idle_window
+    path, head = add_worktree(@main, "recent")
+    File.write(File.join(path, "scratch.txt"), "notes\n")
+    age(path, 3)
+    github("acme/proj", [pull_request(4, :merged, head)])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert File.exist?(path), out
+    assert_empty tarballs
+  end
+
+  def test_a_clean_removal_archives_plans_only
+    path, head = add_worktree(@main, "planned")
+    FileUtils.mkdir_p(File.join(path, ".plans"))
+    File.write(File.join(path, ".plans", "plan.md"), "# plan\n")
+    github("acme/proj", [pull_request(5, :merged, head)])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+    entries = listing(tarballs.first)
+    assert_includes entries, "./plans/plan.md"
+    refute(entries.any? { |entry| entry.start_with?("./untracked/", "./changes.patch") })
+  end
+
+  def test_a_clean_worktree_with_a_submodule_is_force_removed
+    path = add_worktree_with_submodule(@main, "with-sub")
+    github("acme/proj", [pull_request(6, :merged, git(path, "rev-parse", "HEAD"))])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+  end
+
+  def test_a_worktree_dirty_inside_a_submodule_is_kept_unsalvaged
+    path = add_worktree_with_submodule(@main, "sub-dirt")
+    File.write(File.join(path, "dep", "README"), "changed inside\n")
+    age(path, 8)
+    github("acme/proj", [pull_request(6, :merged, git(path, "rev-parse", "HEAD"))])
+
+    out, status = sweep("--verbose")
+
+    assert_equal 0, status, out
+    assert File.exist?(path), out
+    assert_empty tarballs
+    assert_includes out, "changes inside submodules dep"
+  end
+
+  def test_a_clone_hosting_a_nested_worktree_stays_while_the_worktree_is_judged_alone
+    clone = make_repo("tool", dest: File.join(@root, "tool"))
+    nested = File.join(clone, "done")
+    git(@main, "worktree", "add", "-q", "-b", "claude/done", nested, "origin/master")
+    head = commit(nested, "done.txt")
+    github("acme/proj", [pull_request(1, :merged, head)])
+    github("acme/tool", [pull_request(2, :merged, git(clone, "rev-parse", "HEAD"))])
+
+    out, status = sweep("--verbose")
+
+    assert_equal 0, status, out
+    refute File.exist?(nested), out
+    assert File.exist?(clone), out
+    assert_includes out, "keep #{clone}: hosts nested checkouts: done"
+  end
+
+  def test_a_detached_review_checkout_of_a_closed_pr_goes
+    path = File.join(@root, "proj", "review-7")
+    git(@main, "worktree", "add", "-q", "--detach", path, "origin/master")
+    github("acme/proj", [pull_request(7, :closed, git(path, "rev-parse", "HEAD"))])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+  end
+
+  def test_a_failed_lookup_falls_back_to_the_default_branch_rule_and_warns
+    in_default, = add_worktree(@main, "in-default", commits: 0)
+    ahead, = add_worktree(@main, "ahead")
+    age(in_default, 20)
+    age(ahead, 20)
+
+    out, status = sweep
+
+    assert_equal 1, status, out
+    assert_match(%r{PR/MR lookup failed}, out)
+    refute File.exist?(in_default), out
+    assert File.exist?(ahead), out
+  end
+
+  def test_gitlab_merge_requests_are_matched_by_commit
+    main = make_repo("gl", url: "git@gitlab.example.com:group/sub/gl.git")
+    path, head = add_worktree(main, "mr")
+    gitlab("group/sub/gl", [pull_request(9, :merged, head)])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+  end
+
+  def test_clones_go_only_when_nothing_would_be_lost
+    merged = make_repo("proj", dest: File.join(@root, "merged-clone"))
+    unpushed = make_repo("proj", dest: File.join(@root, "unpushed-clone"))
+    commit(unpushed, "local.txt")
+    hosting = make_repo("proj", dest: File.join(@root, "hosting-clone"))
+    git(hosting, "worktree", "add", "-q", "-b", "side", File.join(@root, "hosting-clone-wt"),
+        "origin/master")
+    commit(File.join(@root, "hosting-clone-wt"), "side.txt")
+    no_remote = make_repo("proj", dest: File.join(@root, "no-remote-clone"))
+    git(no_remote, "remote", "remove", "origin")
+    [unpushed, hosting, no_remote].each { |clone| age(clone, 20) }
+    github("acme/proj", [pull_request(1, :merged, git(merged, "rev-parse", "HEAD"))])
+
+    out, status = sweep("--verbose")
+
+    assert_equal 0, status, out
+    refute File.exist?(merged), out
+    [unpushed, hosting, no_remote].each do |clone|
+      assert File.exist?(clone), "#{clone} should stay:\n#{out}"
+    end
+    assert_includes out, "keep #{unpushed}: unpushed: master"
+    assert_includes out, "keep #{hosting}: hosts 1 worktree(s)"
+    assert_includes out, "keep #{no_remote}: unpushed: master"
+  end
+
+  def test_a_process_that_appears_after_classification_stops_the_removal
+    path, head = add_worktree(@main, "raced")
+    github("acme/proj", [pull_request(1, :merged, head)])
+    File.write(File.join(@fixtures, "lsof.late.txt"), "p9\nn#{path}\n")
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert File.exist?(path), out
+    assert_includes out, "kept #{path}: a process is running in it"
+  end
+
+  def test_a_worktree_that_changes_after_classification_is_kept
+    path, head = add_worktree(@main, "moving")
+    github("acme/proj", [pull_request(1, :merged, head)])
+    File.write(File.join(@fixtures, "lsof.late.touch"), File.join(path, "late.txt"))
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert File.exist?(path), out
+    assert_includes out, "kept #{path}: it changed since it was checked"
+  end
+
+  def test_broken_and_stray_dirs_are_reported_and_empty_ones_removed
+    broken = File.join(@root, "proj", "broken")
+    FileUtils.mkdir_p(broken)
+    File.write(File.join(broken, ".git"), "gitdir: #{File.join(@tmp, 'gone')}\n")
+    stray = File.join(@root, "proj", "stray")
+    FileUtils.mkdir_p(File.join(stray, ".claude"))
+    empty = File.join(@root, "empty")
+    FileUtils.mkdir_p(empty)
+    FileUtils.touch(File.join(empty, ".DS_Store"))
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert_includes out, "broken checkout, review manually: #{broken}"
+    assert_includes out, "not a checkout, review manually: #{stray}"
+    assert File.exist?(broken)
+    assert File.exist?(stray)
+    refute File.exist?(empty), out
+  end
+
+  def test_an_unreadable_registry_blocks_every_removal_hook_and_expiry
+    path, head = add_worktree(@main, "done")
+    github("acme/proj", [pull_request(1, :merged, head)])
+    File.write(File.join(@tmp, "registry.json"), "{not json")
+    File.write(File.join(@main, "hook"), "#!/bin/sh\necho ran\n")
+    File.chmod(0o755, File.join(@main, "hook"))
+    write_config(hooks: { @main => "./hook" })
+    old = File.join(@tmp, "salvage", "proj", "old-20260101-0000.tar.gz")
+    FileUtils.mkdir_p(File.dirname(old))
+    FileUtils.touch(old)
+    File.utime(Time.now - (100 * 86_400), Time.now - (100 * 86_400), old)
+
+    out, status = sweep
+
+    assert_equal 1, status, out
+    assert File.exist?(path), out
+    assert File.exist?(old), out
+    refute_includes out, "[hook proj]"
+    assert_match(/nothing is removed this run/, out)
+    assert_match(/removed 0, .*warnings 1\z/, out.strip)
+  end
+
+  def test_a_failing_lsof_blocks_every_removal
+    path, head = add_worktree(@main, "done")
+    github("acme/proj", [pull_request(1, :merged, head)])
+    FileUtils.touch(File.join(@fixtures, "lsof.fail"))
+
+    out, status = sweep
+
+    assert_equal 1, status, out
+    assert File.exist?(path), out
+  end
+
+  def test_a_second_run_exits_while_the_lock_is_held
+    path, head = add_worktree(@main, "done")
+    github("acme/proj", [pull_request(1, :merged, head)])
+    File.open(File.join(@tmp, "sweep.lock"), File::RDWR | File::CREAT) do |lock|
+      lock.flock(File::LOCK_EX)
+      out, status = sweep
+      assert_equal 0, status, out
+      assert_match(/another sweep-worktrees run/, out)
+    end
+    assert File.exist?(path)
+  end
+
+  def test_old_tarballs_expire
+    dir = File.join(@tmp, "salvage", "proj")
+    FileUtils.mkdir_p(dir)
+    old = File.join(dir, "old-20260101-0000.tar.gz")
+    recent = File.join(dir, "recent-20260901-0000.tar.gz")
+    FileUtils.touch([old, recent])
+    File.utime(Time.now - (100 * 86_400), Time.now - (100 * 86_400), old)
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(old), out
+    assert File.exist?(recent)
+  end
+
+  def test_leftovers_over_the_cap_keep_the_worktree_and_warn
+    path, head = add_worktree(@main, "big")
+    File.write(File.join(path, "dump.bin"), "x" * 2048)
+    age(path, 8)
+    github("acme/proj", [pull_request(1, :merged, head)])
+    write_config(salvage_max_mb: 0)
+
+    out, status = sweep
+
+    assert_equal 1, status, out
+    assert File.exist?(path), out
+    assert_match(/over the 0 MB cap/, out)
+  end
+end
