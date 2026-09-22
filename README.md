@@ -23,11 +23,13 @@ It looks at every checkout one or two levels under the root: `<root>/<project>/<
 
 Open PRs/MRs are always fetched in full. Merged and closed ones are capped at the 500 most recent; a checkout idle for 7+ days that matches nothing in that window gets one extra lookup by its own commit, so older merged PRs are still recognized.
 
-Standalone clones follow the same table, but are only deleted when they host no worktrees, hold no stash and have nothing unpushed.
+Standalone clones follow the same table with more care, since deleting a clone deletes its repository: nothing goes before 14 idle days, and a clone stays while it hosts worktrees, holds a stash, has a branch or tag with commits on no remote, or holds git-ignored files other than the usual build output, dependencies, caches, logs and editor or agent folders (a `.env`, say).
+
+Once a repository's worktrees are handled, `git worktree repair` reconnects any that moved within the root, and `git worktree prune` drops the registrations of deleted ones. `prune` can't be limited to a path, so it waits whenever a missing worktree of that repository lies outside the root, leaving that one to git's own gc.
 
 ## What it never touches
 
-- A repository's main checkout, and the checkout it is run from.
+- Checkouts outside the root, such as the main checkouts your worktrees belong to (only their branches and worktree registrations change, as described above), and the checkout it is run from. A standalone clone under the root is judged like any other checkout.
 - Anything a running process has as its working directory (checked with `lsof`).
 - Worktrees the Claude Code desktop app has pooled for reuse or is still creating.
 - A checkout with a `.worktree-keep` file in its root, or one locked with `git worktree lock`.
@@ -37,18 +39,31 @@ Standalone clones follow the same table, but are only deleted when they host no 
 
 Every guard is checked again right before each deletion, and a checkout that changed in the meantime is left alone. If `lsof` fails or the desktop app's registry can't be parsed, the run deletes nothing at all.
 
+Every external command has a deadline: 10 minutes, or an hour for hooks. One that runs over is killed and counts as failed, which keeps whatever depended on it.
+
 Broken checkouts and folders that aren't checkouts are listed in the log and never deleted.
+
+## Forges
+
+A remote on `github.com` goes to `gh`, any other host to `glab`. List GitHub Enterprise hosts under `github_hosts` to send them to `gh` too:
+
+```yaml
+github_hosts:
+  - github.example.com
+```
+
+An SSH remote may use a `Host` alias from `~/.ssh/config`, such as `git@github-work:org/app.git` for a second account. `ssh -G` resolves the alias to the host it points to, so `github-work` counts as `github.com`, and so does `ssh.github.com`, GitHub's SSH endpoint on port 443. A GitLab host is asked as written first and as resolved only if that fails, since the resolved host may be an SSH-only endpoint that `glab` can't query.
 
 ## Salvage
 
-Before a dirty checkout is removed, its leftovers go into `<salvage_dir>/<repo>/<checkout>-<timestamp>.tar.gz`:
+Before a dirty checkout is removed, its leftovers go into `<salvage_dir>/<repo>/<path>-<YYYYmmdd-HHMM>.tar.gz`, where `<path>` is the checkout's path under the root with `/` turned into `_`:
 
 - `MANIFEST`: repo, remote, branch, HEAD, PR/MR, the reason, and the `git status` output
-- `changes.patch`: `git diff --binary HEAD`
+- `changes.patch`: `git diff --binary HEAD`, with your diff settings (external diff tools, textconv, custom prefixes, color) turned off
 - `untracked/`: untracked, non-ignored files
 - `plans/`: the checkout's `.plans/` folder, if any. Agents often keep design notes there, git-ignored; it is saved even when the checkout is otherwise clean.
 
-The tarball is verified before anything is removed. If writing it fails, or the leftovers exceed the size cap, the checkout stays. Tarballs are deleted after 90 days.
+Before anything is removed, the patch is checked to apply back to the checkout and the tarball to list back, and an existing tarball is never overwritten. If any of that fails, or the leftovers exceed the size cap, the checkout stays. Tarballs are deleted after 90 days; other files in `salvage_dir` are left alone.
 
 To restore: extract the tarball, `git apply changes.patch` on a checkout of the recorded HEAD, and copy `untracked/` and `plans/` back.
 
@@ -92,6 +107,9 @@ sweep-worktrees --dry-run --verbose
 | `salvage_retention_days` | `90` | Age at which tarballs are deleted |
 | `forge_lookup_limit` | `500` | How many merged/closed PRs/MRs to fetch per repo |
 | `hooks` | `{}` | Per-repo cleanup commands, see below |
+| `github_hosts` | `[]` | GitHub Enterprise hosts, see [Forges](#forges) |
+
+The config is checked before anything runs: an unknown key, a number that isn't a positive whole number, or broken YAML stops the run with exit code 2.
 
 ### Running it hourly on macOS
 
@@ -145,7 +163,7 @@ The desktop app keeps its own pool of worktrees and reuses idle ones for new ses
 
 ## Output
 
-Each run prints one line per action, warnings prefixed with `warn:`, and a summary. `--verbose` also lists every kept checkout and why. The exit code is 0 for a clean run, 1 if anything warned, and 2 for bad usage or config.
+Each run prints one line per action, warnings prefixed with `warn:`, and a summary. `--verbose` also lists every kept checkout and why. The exit code is 0 for a clean run, 1 if anything warned or another run still holds the lock, and 2 for bad usage or config.
 
 ## Development
 
@@ -154,7 +172,7 @@ bundle install
 bundle exec rake
 ```
 
-Tests build throwaway repositories and use fake `gh`, `glab` and `lsof`, so they never touch real worktrees or the network.
+Tests build throwaway repositories and use fake `gh`, `glab`, `ssh` and `lsof`, so they never touch real worktrees or the network.
 
 ## License
 
