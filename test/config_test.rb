@@ -41,4 +41,21 @@ class ConfigTest < Minitest::Test
   def test_a_non_mapping_file_is_rejected
     assert_raises(SweepWorktrees::Config::Invalid) { SweepWorktrees::Config.load(write("- a\n")) }
   end
+
+  INVALID = {
+    "a number with a unit" => "unmerged_idle_days: 14d",
+    "zero" => "salvage_retention_days: 0",
+    "a negative number" => "salvage_max_mb: -1",
+    "a list of hooks" => "hooks:\n  - bin/hook",
+    "a non-string path" => "salvage_dir: 5",
+    "broken YAML" => "hooks: [",
+  }.freeze
+
+  INVALID.each do |name, yaml|
+    define_method("test_#{name.gsub(/\W+/, '_')}_is_rejected") do
+      assert_raises(SweepWorktrees::Config::Invalid) do
+        SweepWorktrees::Config.load(write("worktrees_root: /w\n#{yaml}\n"))
+      end
+    end
+  end
 end
