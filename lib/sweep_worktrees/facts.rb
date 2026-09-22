@@ -9,7 +9,7 @@ module SweepWorktrees
     :locked, :head, :branch, :dirt, :dirty, :idle_days, :plans,
     :forge_ok, :pr, :head_known, :head_on_ref, :head_in_default,
     :submodule_dirt, :nested_checkouts,
-    :hosted_worktrees, :stash_count, :unpushed_branches,
+    :hosted_worktrees, :stash_count, :unpushed_refs, :precious_ignored,
     keyword_init: true
   ) do
     def detached? = branch.nil?
@@ -26,6 +26,16 @@ module SweepWorktrees
     ].freeze
     V2_FIELDS = { "1" => 9, "2" => 10, "u" => 11 }.freeze
     NESTED_DEPTH = 4
+    # Ignored paths a clone may take with it: dependencies, build output and caches, editor
+    # and agent state, and .plans/, which is salvaged first. Anything else (.env, local
+    # databases, keys) keeps the clone.
+    DISPOSABLE_IGNORED = %w[
+      node_modules vendor target build dist out pkg coverage tmp log logs charts
+      .venv venv __pycache__ .pytest_cache .mypy_cache .ruff_cache .tox .bundle .gradle
+      .next .nuxt .cache .parcel-cache .turbo .terraform
+      .DS_Store .idea .vscode .claude .codex .cursor .zed .superpowers .plans
+    ].freeze
+    DISPOSABLE_IGNORED_FILES = /\A(?:.+\.(?:pyc|log)|Gemfile\.lock)\z/
 
     def initialize(registry:, processes:, idle_floor_days:, now: Time.now, cwd: Dir.pwd)
       @registry = registry
@@ -89,17 +99,32 @@ module SweepWorktrees
 
     def clone_facts(facts, prs)
       path = facts.path
-      merged_heads = prs.select { |pr| pr.state == :merged }.map(&:head_sha)
       worktrees = Command.git!(path, "worktree", "list", "--porcelain")
       facts.hosted_worktrees = worktrees.scan(/^worktree /).size - 1
       facts.stash_count = Command.git!(path, "stash", "list").lines.size
-      branches = Command.git!(path, "for-each-ref", "--format=%(refname:short) %(objectname)",
-                              "refs/heads")
-      facts.unpushed_branches = branches.lines.map(&:split).filter_map do |name, sha|
+      facts.unpushed_refs = unpushed_refs(path, prs)
+      facts.precious_ignored = precious_ignored(path)
+    end
+
+    # Branches and tags holding commits that no remote has, unless a merged PR/MR has them.
+    def unpushed_refs(path, prs)
+      merged_heads = prs.select { |pr| pr.state == :merged }.map(&:head_sha)
+      refs = Command.git!(path, "for-each-ref", "--format=%(refname:short) %(objectname)",
+                          "refs/heads", "refs/tags")
+      refs.lines.map(&:split).filter_map do |name, sha|
         next if merged_heads.include?(sha)
 
         unpushed = Command.git!(path, "rev-list", "--count", sha, "--not", "--remotes").strip
         name unless unpushed == "0"
+      end
+    end
+
+    def precious_ignored(path)
+      listing = Command.git!(path, "ls-files", "--others", "--ignored", "--exclude-standard",
+                             "--directory", "-z")
+      listing.split("\0").reject do |rel|
+        parts = rel.chomp("/").split("/")
+        parts.intersect?(DISPOSABLE_IGNORED) || DISPOSABLE_IGNORED_FILES.match?(parts.last)
       end
     end
 

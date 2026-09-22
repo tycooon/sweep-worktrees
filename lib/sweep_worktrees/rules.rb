@@ -16,7 +16,16 @@ module SweepWorktrees
       guarded = guard(facts)
       return keep(*guarded) if guarded
 
-      facts.forge_ok ? by_pull_request(facts, config) : fallback(facts, config)
+      decided = facts.forge_ok ? by_pull_request(facts, config) : fallback(facts, config)
+      clone_wait(facts, config, decided) || decided
+    end
+
+    # Deleting a clone deletes its repository, so a clone always waits out the longer window.
+    def clone_wait(facts, config, decided)
+      days = config.unmerged_idle_days
+      return unless decided.remove? && facts.kind == :clone && facts.idle_days < days
+
+      waiting(decided.reason, days)
     end
 
     # [reason, tag] when the checkout must not be touched, else nil.
@@ -40,8 +49,9 @@ module SweepWorktrees
       return ["hosts #{facts.hosted_worktrees} worktree(s)", :guarded] if
         facts.hosted_worktrees.positive?
       return ["has stash entries", :guarded] if facts.stash_count.positive?
-      return ["unpushed: #{list(facts.unpushed_branches)}", :guarded] if
-        facts.unpushed_branches.any?
+      return ["unpushed: #{list(facts.unpushed_refs)}", :guarded] if facts.unpushed_refs.any?
+      return ["ignored files that may matter: #{list(facts.precious_ignored)}", :guarded] if
+        facts.precious_ignored.any?
 
       nil
     end

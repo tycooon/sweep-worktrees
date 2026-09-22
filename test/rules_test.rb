@@ -13,7 +13,8 @@ class RulesTest < Minitest::Test
     submodule_dirt: [], nested_checkouts: []
   }.freeze
   DIRTY = { dirty: true, dirt: "?? x\n" }.freeze
-  CLONE = { kind: :clone, hosted_worktrees: 0, stash_count: 0, unpushed_branches: [] }.freeze
+  CLONE = { kind: :clone, hosted_worktrees: 0, stash_count: 0, unpushed_refs: [],
+            precious_ignored: [] }.freeze
 
   CASES = {
     "open PR keeps" => [{ pr: :open }, { action: :keep, tag: :open }],
@@ -83,10 +84,15 @@ class RulesTest < Minitest::Test
                                            { action: :keep, tag: :guarded }],
     "a clone with a stash stays" => [{ pr: :merged, **CLONE, stash_count: 1 },
                                      { action: :keep, tag: :guarded }],
-    "a clone with unpushed work stays" => [{ pr: :merged, **CLONE, unpushed_branches: ["wip"] },
+    "a clone with unpushed work stays" => [{ pr: :merged, **CLONE, unpushed_refs: ["wip"] },
                                            { action: :keep, tag: :guarded }],
-    "a merged clean clone goes" => [{ pr: :merged, **CLONE },
-                                    { action: :remove, delete_branch: false }],
+    "a clone with ignored files that may matter stays" => [
+      { pr: :merged, **CLONE, idle_days: 20.0, precious_ignored: [".env"] }, { action: :keep, tag: :guarded }
+    ],
+    "a merged clean clone waits out the idle window" => [{ pr: :merged, **CLONE, idle_days: 3.0 },
+                                                         { action: :keep, tag: :waiting }],
+    "a merged clean clone goes once idle" => [{ pr: :merged, **CLONE, idle_days: 20.0 },
+                                              { action: :remove, delete_branch: false }],
     "an idle clone without a PR goes" => [{ **CLONE, idle_days: 20.0, head_in_default: true },
                                           { action: :remove, delete_branch: false }],
   }.freeze

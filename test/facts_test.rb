@@ -94,18 +94,39 @@ class FactsTest < Minitest::Test
   def test_clone_facts
     clone = make_repo("app", dest: File.join(@root, "clone"))
     facts = build_facts(clone, kind: :clone)
-    assert_equal [0, 0, []], [facts.hosted_worktrees, facts.stash_count, facts.unpushed_branches]
+    assert_equal [0, 0, [], []],
+                 [facts.hosted_worktrees, facts.stash_count, facts.unpushed_refs, facts.precious_ignored]
 
     head = commit(clone, "local.txt")
-    assert_equal ["master"], build_facts(clone, kind: :clone).unpushed_branches
-    assert_empty build_facts(clone, kind: :clone,
-                                    prs: [pull_request(1, :merged, head)]).unpushed_branches
+    assert_equal ["master"], build_facts(clone, kind: :clone).unpushed_refs
+    assert_empty build_facts(clone, kind: :clone, prs: [pull_request(1, :merged, head)]).unpushed_refs
 
     File.write(File.join(clone, "README"), "changed\n")
     git(clone, "stash", "-q")
     git(clone, "worktree", "add", "-q", "-b", "side", File.join(@root, "clone-side"))
     facts = build_facts(clone, kind: :clone)
     assert_equal [1, 1], [facts.hosted_worktrees, facts.stash_count]
+  end
+
+  def test_an_unpushed_tag_counts_as_unpushed_work
+    clone = make_repo("app", dest: File.join(@root, "clone"))
+    git(clone, "checkout", "-q", "--detach")
+    commit(clone, "tagged.txt")
+    git(clone, "tag", "v1")
+    git(clone, "checkout", "-q", "master")
+
+    assert_equal ["v1"], build_facts(clone, kind: :clone).unpushed_refs
+  end
+
+  def test_only_ignored_files_outside_the_disposable_set_are_precious
+    clone = make_repo("app", dest: File.join(@root, "clone"))
+    File.write(File.join(clone, ".git", "info", "exclude"), ".env\nnode_modules/\ndebug.log\n")
+    File.write(File.join(clone, ".env"), "SECRET=1\n")
+    File.write(File.join(clone, "debug.log"), "noise\n")
+    FileUtils.mkdir_p(File.join(clone, "node_modules", "pkg"))
+    File.write(File.join(clone, "node_modules", "pkg", "index.js"), "\n")
+
+    assert_equal [".env"], build_facts(clone, kind: :clone).precious_ignored
   end
 
   def test_changes_inside_a_submodule_are_reported

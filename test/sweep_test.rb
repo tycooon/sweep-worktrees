@@ -339,19 +339,25 @@ class SweepTest < Minitest::Test
     commit(File.join(@root, "hosting-clone-wt"), "side.txt")
     no_remote = make_repo("proj", dest: File.join(@root, "no-remote-clone"))
     git(no_remote, "remote", "remove", "origin")
-    [unpushed, hosting, no_remote].each { |clone| age(clone, 20) }
+    with_env = make_repo("proj", dest: File.join(@root, "env-clone"))
+    File.write(File.join(with_env, ".git", "info", "exclude"), ".env\n")
+    File.write(File.join(with_env, ".env"), "SECRET=1\n")
+    fresh = make_repo("proj", dest: File.join(@root, "fresh-clone"))
+    [merged, unpushed, hosting, no_remote, with_env].each { |clone| age(clone, 20) }
     github("acme/proj", [pull_request(1, :merged, git(merged, "rev-parse", "HEAD"))])
 
     out, status = sweep("--verbose")
 
     assert_equal 0, status, out
     refute File.exist?(merged), out
-    [unpushed, hosting, no_remote].each do |clone|
+    [unpushed, hosting, no_remote, with_env, fresh].each do |clone|
       assert File.exist?(clone), "#{clone} should stay:\n#{out}"
     end
     assert_includes out, "keep #{unpushed}: unpushed: master"
     assert_includes out, "keep #{hosting}: hosts 1 worktree(s)"
     assert_includes out, "keep #{no_remote}: unpushed: master"
+    assert_includes out, "keep #{with_env}: ignored files that may matter: .env"
+    assert_match(/keep #{Regexp.escape(fresh)}: merged .*, idle < 14d/, out)
   end
 
   def test_a_process_that_appears_after_classification_stops_the_removal
