@@ -25,7 +25,7 @@ Open PRs/MRs are always fetched in full. Merged and closed ones are capped at th
 
 Standalone clones follow the same table with more care, since deleting a clone deletes its repository: nothing goes before 14 idle days, and a clone stays while it hosts worktrees, holds a stash, has a branch or tag with commits on no remote, or holds git-ignored files other than the usual build output, dependencies, caches, logs and editor or agent folders (a `.env`, say).
 
-Once a repository's worktrees are handled, `git worktree repair` reconnects any that moved within the root, and `git worktree prune` drops the registrations of deleted ones. `prune` can't be limited to a path, so it waits whenever a missing worktree of that repository lies outside the root, leaving that one to git's own gc.
+Before a repository's worktrees are judged, any that moved within the root are reconnected to their registration. Afterwards, `git worktree prune` drops the registrations of deleted ones, but no sooner than git's own gc would (`gc.worktreePruneExpire`, 3 months by default): a worktree moved elsewhere with a plain `mv` looks just like a deleted one. It also waits while any missing worktree of that repository lies outside the root. To move a worktree for good, use `git worktree move`.
 
 ## What it never touches
 

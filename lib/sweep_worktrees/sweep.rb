@@ -37,8 +37,9 @@ module SweepWorktrees
       return unless builder
 
       worktrees, clones = checkouts.partition { |checkout| checkout.kind == :worktree }
+      actions.reconnect(repo, worktrees.map(&:path))
       sweep(worktrees, repo, builder, actions)
-      actions.prune(repo, worktrees.map(&:path)) unless worktrees.empty?
+      actions.prune(repo) unless worktrees.empty?
       sweep(clones, repo, builder, actions)
     end
 

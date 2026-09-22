@@ -465,7 +465,28 @@ class SweepTest < Minitest::Test
     git(@main, "worktree", "list", "--porcelain").include?("worktree #{path}\n")
   end
 
-  def test_a_moved_project_folder_is_repaired_not_pruned
+  def admin_dir(path) = git(path, "rev-parse", "--path-format=absolute", "--git-dir")
+
+  def test_a_moved_project_folder_is_reconnected_before_the_sweep
+    path, = add_worktree(@main, "moved", project: "old")
+    File.write(File.join(path, "wip.txt"), "wip\n")
+    _, head = add_worktree(@main, "done", project: "old")
+    github("acme/proj", [pull_request(1, :merged, head, branch: "claude/done")])
+    FileUtils.mv(File.join(@root, "old"), File.join(@root, "new"))
+    moved = File.join(@root, "new", "moved")
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert registered?(moved), out
+    assert_includes git(moved, "status", "--short"), "wip.txt"
+    refute File.exist?(File.join(@root, "new", "done")), out
+  end
+
+  def test_a_relative_registration_stays_relative_when_reconnected
+    git_version = Gem::Version.new(git(@tmp, "version")[/\d+\.\d+/])
+    skip "needs git 2.48+" if git_version < Gem::Version.new("2.48")
+    git(@main, "config", "worktree.useRelativePaths", "true")
     path, = add_worktree(@main, "moved", project: "old")
     File.write(File.join(path, "wip.txt"), "wip\n")
     github("acme/proj", [])
@@ -475,8 +496,68 @@ class SweepTest < Minitest::Test
     out, status = sweep
 
     assert_equal 0, status, out
-    assert registered?(moved), out
-    assert_includes git(moved, "status", "--short"), "wip.txt"
+    admin = admin_dir(moved)
+    registered = File.read(File.join(admin, "gitdir")).strip
+    refute File.absolute_path?(registered), registered
+    assert_equal File.join(moved, ".git"), File.expand_path(registered, admin)
+  end
+
+  def test_a_worktree_moved_out_of_sight_keeps_its_registration
+    add_worktree(@main, "active")
+    path, = add_worktree(@main, "parked")
+    File.write(File.join(path, "staged.txt"), "staged\n")
+    git(path, "add", "staged.txt")
+    parked = File.join(@root, "_parked", "parked")
+    FileUtils.mkdir_p(File.dirname(parked))
+    FileUtils.mv(path, parked)
+    github("acme/proj", [])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert registered?(path), out
+    assert_includes git(parked, "status", "--short"), "A  staged.txt"
+    refute_match(/reconnected/, out)
+  end
+
+  def test_a_copy_never_takes_over_a_live_registration
+    outside = File.join(@tmp, "elsewhere", "wt")
+    git(@main, "worktree", "add", "-q", "-b", "claude/wt", outside, "origin/master")
+    copy = File.join(@root, "proj", "wt-copy")
+    FileUtils.mkdir_p(File.dirname(copy))
+    FileUtils.cp_r(outside, copy)
+    github("acme/proj", [])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert registered?(outside), out
+    refute registered?(copy), out
+
+    FileUtils.cp_r(copy, "#{copy}-2")
+    FileUtils.rm_rf(outside)
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute registered?(copy), out
+    refute registered?("#{copy}-2"), out
+  end
+
+  def test_another_repositorys_worktree_at_a_stale_path_is_left_alone
+    add_worktree(@main, "active")
+    shared = File.join(@tmp, "elsewhere", "shared")
+    git(@main, "worktree", "add", "-q", "-b", "claude/shared", shared, "origin/master")
+    FileUtils.rm_rf(shared)
+    other = make_repo("other")
+    git(other, "worktree", "add", "-q", "-b", "mine", shared, "origin/master")
+    github("acme/proj", [])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    common = git(shared, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    assert_equal File.join(other, ".git"), common
+    assert_equal "mine", git(shared, "branch", "--show-current")
   end
 
   def test_prune_waits_while_a_worktree_outside_the_root_is_missing
@@ -492,16 +573,26 @@ class SweepTest < Minitest::Test
     assert registered?(outside), out
   end
 
-  def test_stale_registrations_under_the_root_are_pruned
+  def test_stale_registrations_under_the_root_are_pruned_once_gc_would
     add_worktree(@main, "active")
-    gone, = add_worktree(@main, "gone")
-    FileUtils.rm_rf(gone)
+    old, = add_worktree(@main, "old-gone")
+    recent, = add_worktree(@main, "recent-gone")
+    long_ago = Time.now - (100 * 86_400)
+    File.utime(long_ago, long_ago, File.join(admin_dir(old), "index"))
+    FileUtils.rm_rf([old, recent])
     github("acme/proj", [])
 
     out, status = sweep
 
     assert_equal 0, status, out
-    refute registered?(gone), out
+    refute registered?(old), out
+    assert registered?(recent), out
+
+    git(@main, "config", "gc.worktreePruneExpire", "now")
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute registered?(recent), out
   end
 
   def test_a_second_run_exits_while_the_lock_is_held

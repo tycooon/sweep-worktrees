@@ -6,12 +6,20 @@ module SweepWorktrees
     attr_reader :dir
 
     def self.of(path)
-      common = Command.git!(path, "rev-parse", "--path-format=absolute", "--git-common-dir").strip
+      common = common_dir_of(path)
       new(File.basename(common) == ".git" ? File.dirname(common) : common)
+    end
+
+    def self.common_dir_of(path)
+      Command.git!(path, "rev-parse", "--path-format=absolute", "--git-common-dir").strip
     end
 
     def initialize(dir)
       @dir = dir
+    end
+
+    def common_dir
+      @common_dir ||= self.class.common_dir_of(dir)
     end
 
     def name = File.basename(dir)

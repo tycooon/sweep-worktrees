@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "pathname"
 require "shellwords"
 
 module SweepWorktrees
@@ -38,22 +39,37 @@ module SweepWorktrees
       false
     end
 
-    # `git worktree prune` has no path filter: it drops every registration whose folder is
-    # missing right now, including a renamed project folder or an unmounted volume. So moved
-    # worktrees under the root are repaired first, and pruning waits while any missing
-    # worktree lies outside the root.
-    def prune(repo, paths)
+    # A worktree moved within the root still works, but its registration names the old folder,
+    # so git can't find it by path and prune would drop it. `git worktree repair` fixes that,
+    # but it also rewrites the `.git` file of whatever sits at any other registered path,
+    # another repository's worktree included. This writes only this repository's admin dirs.
+    def reconnect(repo, paths)
+      return if @dry_run || paths.empty?
+
+      admin_root = File.realpath(File.join(repo.common_dir, "worktrees"))
+      paths.group_by { |path| admin_dir(path) }.each do |admin, claimants|
+        next unless admin && claimants.one? && File.dirname(admin) == admin_root
+
+        relink(admin, claimants.first)
+      end
+    rescue FactError, SystemCallError => error
+      @log.warn("could not reconnect moved worktrees of #{repo.dir}: #{error.message}")
+    end
+
+    # A worktree moved with plain `mv` looks just like a deleted one, so pruning waits as long
+    # as git's own gc would (gc.worktreePruneExpire). `prune` has no path filter, so it also
+    # waits while any expired entry lies outside the root.
+    def prune(repo)
       return if @dry_run
 
-      existing = paths.select { |path| File.directory?(path) }
-      Command.git(repo.dir, "worktree", "repair", *existing) if existing.any?
-      stale = prunable(repo)
+      expire = "--expire=#{prune_expiry(repo)}"
+      stale = prunable(repo, expire)
       return if stale.nil? || stale.empty?
 
       outside = stale.reject { |path| path.start_with?("#{@config.worktrees_root}/") }
       return @log.verbose("left missing worktrees to git gc: #{outside.join(', ')}") if outside.any?
 
-      res = Command.git(repo.dir, "worktree", "prune")
+      res = Command.git(repo.dir, "worktree", "prune", expire)
       @log.warn("git worktree prune failed in #{repo.dir}: #{res.err.strip}") unless res.ok?
     end
 
@@ -88,8 +104,36 @@ module SweepWorktrees
 
     private
 
-    def prunable(repo)
-      res = Command.git(repo.dir, "worktree", "list", "--porcelain")
+    def admin_dir(path)
+      link = File.read(File.join(path, ".git"))[/\Agitdir: (.+)$/, 1] or return nil
+      File.realpath(File.expand_path(link, path))
+    rescue SystemCallError
+      nil
+    end
+
+    # Only a registration whose folder is gone moves: one that still resolves belongs to the
+    # original, and this folder is a copy.
+    def relink(admin, path)
+      file = File.join(admin, "gitdir")
+      registered = File.read(file).strip
+      return if File.exist?(File.expand_path(registered, admin))
+
+      target = File.join(File.realpath(path), ".git")
+      # worktree.useRelativePaths writes registrations relative to the admin dir.
+      unless File.absolute_path?(registered)
+        target = Pathname(target).relative_path_from(admin).to_s
+      end
+      File.write(file, "#{target}\n")
+      @log.info("reconnected moved worktree #{path}")
+    end
+
+    def prune_expiry(repo)
+      res = Command.git(repo.dir, "config", "--get", "gc.worktreePruneExpire")
+      res.ok? ? res.out.strip : "3.months.ago"
+    end
+
+    def prunable(repo, expire)
+      res = Command.git(repo.dir, "worktree", "list", "--porcelain", expire)
       return unless res.ok?
 
       res.out.split("\n\n").filter_map do |block|
