@@ -25,7 +25,7 @@ module SweepWorktrees
       if builder
         tidy(found, actions)
       else
-        @log.info("skipped empty dirs, hooks and tarball expiry: " \
+        @log.info("skipped pruning, empty dirs, hooks and tarball expiry: " \
                   "this run is not safe to delete anything")
       end
       summarize(actions.counts)
@@ -34,10 +34,12 @@ module SweepWorktrees
     private
 
     def sweep_repo(repo, checkouts, builder, actions)
+      return unless builder
+
       worktrees, clones = checkouts.partition { |checkout| checkout.kind == :worktree }
-      sweep(worktrees, repo, builder, actions) if builder
-      actions.prune(repo) unless worktrees.empty?
-      sweep(clones, repo, builder, actions) if builder
+      sweep(worktrees, repo, builder, actions)
+      actions.prune(repo, worktrees.map(&:path)) unless worktrees.empty?
+      sweep(clones, repo, builder, actions)
     end
 
     def tidy(found, actions)

@@ -398,7 +398,7 @@ class SweepTest < Minitest::Test
     refute File.exist?(empty), out
   end
 
-  def test_an_unreadable_registry_blocks_every_removal_hook_and_expiry
+  def test_an_unreadable_registry_blocks_every_removal_prune_hook_and_expiry
     path, head = add_worktree(@main, "done")
     github("acme/proj", [pull_request(1, :merged, head)])
     File.write(File.join(@tmp, "registry.json"), "{not json")
@@ -409,12 +409,15 @@ class SweepTest < Minitest::Test
     FileUtils.mkdir_p(File.dirname(old))
     FileUtils.touch(old)
     File.utime(Time.now - (100 * 86_400), Time.now - (100 * 86_400), old)
+    gone, = add_worktree(@main, "gone")
+    FileUtils.rm_rf(gone)
 
     out, status = sweep
 
     assert_equal 1, status, out
     assert File.exist?(path), out
     assert File.exist?(old), out
+    assert registered?(gone), out
     refute_includes out, "[hook proj]"
     assert_match(/nothing is removed this run/, out)
     assert_match(/removed 0, .*warnings 1\z/, out.strip)
@@ -429,6 +432,47 @@ class SweepTest < Minitest::Test
 
     assert_equal 1, status, out
     assert File.exist?(path), out
+  end
+
+  def registered?(path) = git(@main, "worktree", "list", "--porcelain").include?("worktree #{path}\n")
+
+  def test_a_moved_project_folder_is_repaired_not_pruned
+    path, = add_worktree(@main, "moved", project: "old")
+    File.write(File.join(path, "wip.txt"), "wip\n")
+    github("acme/proj", [])
+    FileUtils.mv(File.join(@root, "old"), File.join(@root, "new"))
+    moved = File.join(@root, "new", "moved")
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert registered?(moved), out
+    assert_includes git(moved, "status", "--short"), "wip.txt"
+  end
+
+  def test_prune_waits_while_a_worktree_outside_the_root_is_missing
+    add_worktree(@main, "active")
+    outside = File.join(@tmp, "outside", "wt")
+    git(@main, "worktree", "add", "-q", "-b", "claude/outside", outside, "origin/master")
+    FileUtils.mv(outside, "#{outside}-unmounted")
+    github("acme/proj", [])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    assert registered?(outside), out
+  end
+
+  def test_stale_registrations_under_the_root_are_pruned
+    add_worktree(@main, "active")
+    gone, = add_worktree(@main, "gone")
+    FileUtils.rm_rf(gone)
+    github("acme/proj", [])
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute registered?(gone), out
   end
 
   def test_a_second_run_exits_while_the_lock_is_held

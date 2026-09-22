@@ -36,8 +36,20 @@ module SweepWorktrees
       false
     end
 
-    def prune(repo)
+    # `git worktree prune` has no path filter: it drops every registration whose folder is
+    # missing right now, including a renamed project folder or an unmounted volume. So moved
+    # worktrees under the root are repaired first, and pruning waits while any missing
+    # worktree lies outside the root.
+    def prune(repo, paths)
       return if @dry_run
+
+      existing = paths.select { |path| File.directory?(path) }
+      Command.git(repo.dir, "worktree", "repair", *existing) if existing.any?
+      stale = prunable(repo)
+      return if stale.nil? || stale.empty?
+
+      outside = stale.reject { |path| path.start_with?("#{@config.worktrees_root}/") }
+      return @log.verbose("left missing worktrees to git gc: #{outside.join(', ')}") if outside.any?
 
       res = Command.git(repo.dir, "worktree", "prune")
       @log.warn("git worktree prune failed in #{repo.dir}: #{res.err.strip}") unless res.ok?
@@ -73,6 +85,16 @@ module SweepWorktrees
     end
 
     private
+
+    def prunable(repo)
+      res = Command.git(repo.dir, "worktree", "list", "--porcelain")
+      return unless res.ok?
+
+      res.out.split("\n\n").filter_map do |block|
+        lines = block.lines.map(&:chomp)
+        lines.first.delete_prefix("worktree ") if lines.any? { |line| line.start_with?("prunable") }
+      end
+    end
 
     def stopped?(facts, repo, prs)
       reason = @recheck.call(facts, repo, prs) or return false
