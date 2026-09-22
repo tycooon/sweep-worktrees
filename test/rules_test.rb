@@ -87,7 +87,8 @@ class RulesTest < Minitest::Test
     "a clone with unpushed work stays" => [{ pr: :merged, **CLONE, unpushed_refs: ["wip"] },
                                            { action: :keep, tag: :guarded }],
     "a clone with ignored files that may matter stays" => [
-      { pr: :merged, **CLONE, idle_days: 20.0, precious_ignored: [".env"] }, { action: :keep, tag: :guarded }
+      { pr: :merged, **CLONE, idle_days: 20.0, precious_ignored: [".env"] },
+      { action: :keep, tag: :guarded },
     ],
     "a merged clean clone waits out the idle window" => [{ pr: :merged, **CLONE, idle_days: 3.0 },
                                                          { action: :keep, tag: :waiting }],
@@ -105,8 +106,8 @@ class RulesTest < Minitest::Test
   CASES.each do |name, (overrides, expected)|
     define_method("test_#{name.gsub(/\W+/, '_')}") do
       given = overrides[:pr] ? overrides.merge(pr: pr(overrides[:pr])) : overrides
-      verdict = SweepWorktrees::Rules.verdict(SweepWorktrees::Facts.new(**BASE, **given),
-                                              CONFIG)
+      facts = SweepWorktrees::Facts.new(**BASE, **given)
+      verdict = SweepWorktrees::Rules.verdict(facts, CONFIG)
       expected.each do |attr, value|
         assert_equal value, verdict.public_send(attr), "#{name}: #{attr} (#{verdict.reason})"
       end

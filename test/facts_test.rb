@@ -94,12 +94,13 @@ class FactsTest < Minitest::Test
   def test_clone_facts
     clone = make_repo("app", dest: File.join(@root, "clone"))
     facts = build_facts(clone, kind: :clone)
-    assert_equal [0, 0, [], []],
-                 [facts.hosted_worktrees, facts.stash_count, facts.unpushed_refs, facts.precious_ignored]
+    fields = %i[hosted_worktrees stash_count unpushed_refs precious_ignored]
+    assert_equal [0, 0, [], []], fields.map { |field| facts[field] }
 
     head = commit(clone, "local.txt")
     assert_equal ["master"], build_facts(clone, kind: :clone).unpushed_refs
-    assert_empty build_facts(clone, kind: :clone, prs: [pull_request(1, :merged, head)]).unpushed_refs
+    merged = [pull_request(1, :merged, head)]
+    assert_empty build_facts(clone, kind: :clone, prs: merged).unpushed_refs
 
     File.write(File.join(clone, "README"), "changed\n")
     git(clone, "stash", "-q")

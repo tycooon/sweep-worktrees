@@ -82,7 +82,9 @@ module SweepWorktrees
       file = File.join(stage, "changes.patch")
       File.write(file, patch)
       check = Command.git(path, "apply", "--check", "--reverse", "--whitespace=nowarn", file)
-      raise Failed, "the patch does not apply back to the checkout: #{check.err.strip}" unless check.ok?
+      return if check.ok?
+
+      raise Failed, "the patch does not apply back to the checkout: #{check.err.strip}"
     end
 
     def plans_files(path)
@@ -106,8 +108,11 @@ module SweepWorktrees
         src = File.join(src_root, rel)
         dest = File.join(dest_root, rel)
         FileUtils.mkdir_p(File.dirname(dest))
-        File.symlink?(src) ? File.symlink(File.readlink(src),
-                                          dest) : FileUtils.cp_r(src, dest, preserve: true)
+        if File.symlink?(src)
+          File.symlink(File.readlink(src), dest)
+        else
+          FileUtils.cp_r(src, dest, preserve: true)
+        end
       end
     end
 

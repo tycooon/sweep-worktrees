@@ -22,7 +22,8 @@ module SweepWorktrees
     def run(*args, chdir: nil, merge_err: false, timeout: TIMEOUT)
       opts = { pgroup: true }
       opts[:chdir] = chdir if chdir
-      Open3.public_send(merge_err ? :popen2e : :popen3, ENV_OVERRIDES, *args, **opts) do |stdin, *pipes, wait|
+      popen = merge_err ? :popen2e : :popen3
+      Open3.public_send(popen, ENV_OVERRIDES, *args, **opts) do |stdin, *pipes, wait|
         stdin.close
         readers = pipes.map { |pipe| Thread.new { pipe.read } }
         finished = wait.join(timeout)

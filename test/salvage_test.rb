@@ -11,9 +11,9 @@ class SalvageTest < Minitest::Test
     SweepWorktrees::Config.new(values.merge(overrides.transform_keys(&:to_s)))
   end
 
-  def salvage(path, **options)
-    SweepWorktrees::Salvage.new(config(**options), now: Time.new(2026, 9, 21, 12, 30))
-                           .write(build_facts(path), repo_name: "app", remote_url: nil, reason: "merged")
+  def salvage(path, **)
+    writer = SweepWorktrees::Salvage.new(config(**), now: Time.new(2026, 9, 21, 12, 30))
+    writer.write(build_facts(path), repo_name: "app", remote_url: nil, reason: "merged")
   end
 
   def test_the_tarball_holds_the_patch_untracked_files_plans_and_a_manifest
@@ -55,15 +55,17 @@ class SalvageTest < Minitest::Test
     main = make_repo("app")
     path, head = add_worktree(main, "feature")
     File.write(File.join(path, "feature-0.txt"), "changed\n")
-    { "diff.external" => "echo", "diff.noprefix" => "true", "color.ui" => "always",
-      "diff.mnemonicPrefix" => "true" }.each { |key, value| git(@tmp, "config", "--global", key, value) }
+    settings = { "diff.external" => "echo", "diff.noprefix" => "true", "color.ui" => "always",
+                 "diff.mnemonicPrefix" => "true" }
+    settings.each { |key, value| git(@tmp, "config", "--global", key, value) }
 
     tarball = salvage(path)
 
     check = File.join(@tmp, "check")
     git(main, "worktree", "add", "-q", "--detach", check, head)
-    File.write(File.join(@tmp, "changes.patch"), sh!("tar", "-xOzf", tarball, "./changes.patch") + "\n")
-    git(check, "apply", "--check", File.join(@tmp, "changes.patch"))
+    patch = File.join(@tmp, "changes.patch")
+    File.write(patch, "#{sh!('tar', '-xOzf', tarball, './changes.patch')}\n")
+    git(check, "apply", "--check", patch)
   end
 
   def test_same_named_checkouts_get_separate_tarballs
@@ -97,7 +99,8 @@ class SalvageTest < Minitest::Test
     fresh = File.join(dir, "app_fresh-20260920-0000.tar.gz")
     foreign = File.join(dir, "backup.tar.gz")
     FileUtils.touch([old, fresh, foreign])
-    [old, foreign].each { |file| File.utime(Time.now - (91 * 86_400), Time.now - (91 * 86_400), file) }
+    stale = Time.now - (91 * 86_400)
+    File.utime(stale, stale, old, foreign)
 
     assert_equal [old], SweepWorktrees::Salvage.new(config).expired
   end
