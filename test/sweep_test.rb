@@ -29,6 +29,11 @@ class SweepTest < Minitest::Test
       abort("glab: no fixture for #{project}") unless File.exist?(file)
       print(path.match?(/[?&]page=1\z/) ? File.read(file) : "[]")
     RUBY
+    # Keeps the host of an SSH remote as it is, whatever the real ~/.ssh/config says.
+    "ssh" => <<~'RUBY',
+      #!/usr/bin/env ruby
+      puts "hostname #{ARGV.last}"
+    RUBY
     # The first call is the classification snapshot; later calls are the re-checks
     # before each action.
     "lsof" => <<~'RUBY',
@@ -101,10 +106,8 @@ class SweepTest < Minitest::Test
                JSON.generate("schemaVersion" => 2, "worktrees" => worktrees))
   end
 
-  def branch?(repo,
-              name)
-    system("git", "-C", repo, "show-ref", "--verify", "--quiet",
-           "refs/heads/#{name}")
+  def branch?(repo, name)
+    system("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/#{name}")
   end
 
   def tarballs = Dir.glob(File.join(@tmp, "salvage", "*", "*.tar.gz"))
@@ -225,23 +228,23 @@ class SweepTest < Minitest::Test
     refute branch?(@main, "claude/old")
   end
 
-def test_a_detached_review_checkout_found_only_by_its_commit_goes
-  path = File.join(@root, "proj", "old-review")
-  git(@main, "worktree", "add", "-q", "--detach", path, "origin/master")
-  head = commit(path, "fork-change.txt")
-  age(path, 30)
-  github("acme/proj", [])
-  closed = { "number" => 8, "state" => "closed", "merged_at" => nil,
-             "head" => { "sha" => head, "ref" => "fork-branch" },
-             "html_url" => "https://example.com/pr/8" }
-  File.write(File.join(@fixtures, "gh-api-repos_acme_proj_commits_#{head}_pulls.json"),
-             JSON.generate([closed]))
+  def test_a_detached_review_checkout_found_only_by_its_commit_goes
+    path = File.join(@root, "proj", "old-review")
+    git(@main, "worktree", "add", "-q", "--detach", path, "origin/master")
+    head = commit(path, "fork-change.txt")
+    age(path, 30)
+    github("acme/proj", [])
+    closed = { "number" => 8, "state" => "closed", "merged_at" => nil,
+               "head" => { "sha" => head, "ref" => "fork-branch" },
+               "html_url" => "https://example.com/pr/8" }
+    File.write(File.join(@fixtures, "gh-api-repos_acme_proj_commits_#{head}_pulls.json"),
+               JSON.generate([closed]))
 
-  out, status = sweep
+    out, status = sweep
 
-  assert_equal 0, status, out
-  refute File.exist?(path), out
-end
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+  end
 
   def test_a_dirty_merged_worktree_waits_under_the_idle_window
     path, head = add_worktree(@main, "recent")
@@ -458,7 +461,9 @@ end
     assert File.exist?(path), out
   end
 
-  def registered?(path) = git(@main, "worktree", "list", "--porcelain").include?("worktree #{path}\n")
+  def registered?(path)
+    git(@main, "worktree", "list", "--porcelain").include?("worktree #{path}\n")
+  end
 
   def test_a_moved_project_folder_is_repaired_not_pruned
     path, = add_worktree(@main, "moved", project: "old")
@@ -528,15 +533,15 @@ end
 
   def test_leftovers_over_the_cap_keep_the_worktree_and_warn
     path, head = add_worktree(@main, "big")
-    File.write(File.join(path, "dump.bin"), "x" * 2048)
+    File.write(File.join(path, "dump.bin"), "x" * ((1024 * 1024) + 1))
     age(path, 8)
     github("acme/proj", [pull_request(1, :merged, head)])
-    write_config(salvage_max_mb: 0)
+    write_config(salvage_max_mb: 1)
 
     out, status = sweep
 
     assert_equal 1, status, out
     assert File.exist?(path), out
-    assert_match(/over the 0 MB cap/, out)
+    assert_match(/over the 1 MB cap/, out)
   end
 end

@@ -5,6 +5,16 @@ require_relative "test_helper"
 class ConfigTest < Minitest::Test
   include TestHelper
 
+  INVALID = {
+    "a number with a unit" => "unmerged_idle_days: 14d",
+    "zero" => "salvage_retention_days: 0",
+    "a negative number" => "salvage_max_mb: -1",
+    "a list of hooks" => "hooks:\n  - bin/hook",
+    "a non-string path" => "salvage_dir: 5",
+    "broken YAML" => "hooks: [",
+    "a single GitHub host" => "github_hosts: github.example.com",
+  }.freeze
+
   def write(yaml)
     File.join(@tmp, "config.yml").tap { |path| File.write(path, yaml) }
   end
@@ -22,6 +32,13 @@ class ConfigTest < Minitest::Test
     assert_equal File.expand_path("~/.local/share/sweep-worktrees/salvage"), config.salvage_dir
     assert_equal File.expand_path("~/.cache/sweep-worktrees.lock"), config.lock_file
     assert_equal({ File.expand_path("~/code/app") => "bin/hook" }, config.hooks)
+    assert_empty config.github_hosts
+  end
+
+  def test_github_hosts_are_read_as_a_list
+    yaml = "worktrees_root: /w\ngithub_hosts: [github.example.com]\n"
+
+    assert_equal ["github.example.com"], SweepWorktrees::Config.load(write(yaml)).github_hosts
   end
 
   def test_the_worktrees_root_is_required
@@ -41,15 +58,6 @@ class ConfigTest < Minitest::Test
   def test_a_non_mapping_file_is_rejected
     assert_raises(SweepWorktrees::Config::Invalid) { SweepWorktrees::Config.load(write("- a\n")) }
   end
-
-  INVALID = {
-    "a number with a unit" => "unmerged_idle_days: 14d",
-    "zero" => "salvage_retention_days: 0",
-    "a negative number" => "salvage_max_mb: -1",
-    "a list of hooks" => "hooks:\n  - bin/hook",
-    "a non-string path" => "salvage_dir: 5",
-    "broken YAML" => "hooks: [",
-  }.freeze
 
   INVALID.each do |name, yaml|
     define_method("test_#{name.gsub(/\W+/, '_')}_is_rejected") do

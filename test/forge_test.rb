@@ -5,18 +5,25 @@ require_relative "test_helper"
 class ForgeTest < Minitest::Test
   Status = Struct.new(:success?)
 
-  # Answers each call with handler.call(args) → [stdout, ok].
+  # Answers each forge call with handler.call(args) → [stdout, ok]; `ssh -G` resolves aliases.
   class FakeRunner
     attr_reader :calls
 
-    def initialize(&handler)
+    def initialize(aliases: {}, &handler)
       @handler = handler
+      @aliases = aliases
       @calls = []
     end
 
     def run(*args, **)
+      host = args.last
+      return result("hostname #{@aliases.fetch(host, host)}\n", true) if args.first == "ssh"
+
       @calls << args
-      out, success = @handler.call(args)
+      result(*@handler.call(args))
+    end
+
+    def result(out, success)
       SweepWorktrees::Result.new(out, success ? "" : "boom", Status.new(success))
     end
   end
@@ -31,7 +38,56 @@ class ForgeTest < Minitest::Test
     "ssh://git@git.example.com:2222/group/app.git" => ["git.example.com", "group/app"],
   }.freeze
 
-  def forge(runner, limit: 500) = SweepWorktrees::Forge.new(limit:, runner:)
+  def forge(runner, limit: 500, github_hosts: [])
+    SweepWorktrees::Forge.new(limit:, runner:, github_hosts:)
+  end
+
+  def test_an_ssh_alias_resolves_to_its_real_host
+    runner = FakeRunner.new(aliases: { "github-work" => "github.com" }) { ["[]", true] }
+
+    forge(runner).pull_requests("git@github-work:acme/app.git")
+
+    assert_equal %W[gh pr list --repo acme/app --state open --limit 5000 --json #{GH_FIELDS}],
+                 runner.calls.first
+  end
+
+  def test_a_gitlab_alias_is_asked_as_written_then_as_ssh_resolves_it
+    runner = FakeRunner.new(aliases: { "gitlab-work" => "gitlab.example.com" }) do |args|
+      ["[]", args[3] != "gitlab-work"]
+    end
+
+    assert_equal [], forge(runner).pull_requests("git@gitlab-work:group/app.git")
+    assert_equal %w[gitlab-work gitlab.example.com gitlab.example.com],
+                 runner.calls.map { |call| call[3] }
+  end
+
+  def test_a_host_that_answers_as_written_is_not_asked_again
+    runner = FakeRunner.new(aliases: { "gitlab.example.com" => "10.0.0.5" }) { ["[]", true] }
+
+    forge(runner).pull_requests_for_commit("git@gitlab.example.com:group/app.git", "abc")
+
+    assert_equal ["gitlab.example.com"], runner.calls.map { |call| call[3] }
+  end
+
+  def test_ssh_over_the_https_port_is_github
+    runner = FakeRunner.new { ["[]", true] }
+
+    forge(runner).pull_requests("ssh://git@ssh.github.com:443/acme/app.git")
+
+    assert_equal %w[gh acme/app], runner.calls.first.values_at(0, 4)
+  end
+
+  def test_configured_github_hosts_go_to_gh_with_their_host
+    runner = FakeRunner.new { ["[]", true] }
+    enterprise = forge(runner, github_hosts: ["github.example.com"])
+
+    enterprise.pull_requests("https://github.example.com/acme/app.git")
+    enterprise.pull_requests_for_commit("https://github.example.com/acme/app.git", "abc")
+
+    assert_equal "github.example.com/acme/app", runner.calls.first[4]
+    assert_equal %w[gh api --hostname github.example.com repos/acme/app/commits/abc/pulls],
+                 runner.calls.last
+  end
 
   def pr(state, head, branch)
     SweepWorktrees::PullRequest.new(number: 1, state:, head_sha: head, source_branch: branch)

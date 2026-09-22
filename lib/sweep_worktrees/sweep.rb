@@ -9,7 +9,7 @@ module SweepWorktrees
       @config = config
       @log = log
       @dry_run = dry_run
-      @forge = Forge.new(limit: config.forge_lookup_limit)
+      @forge = Forge.new(limit: config.forge_lookup_limit, github_hosts: config.github_hosts)
       @kept = Hash.new(0)
       @attention = []
     end

@@ -8,12 +8,12 @@ module SweepWorktrees
 
   # PR/MR state from GitHub (gh) or any other host treated as GitLab (glab). A failed lookup is nil.
   class Forge
-    Remote = Struct.new(:host, :project)
+    Remote = Struct.new(:host, :project, :ssh)
 
-    REMOTE_FORMS = [
-      %r{\A(?:https?|ssh)://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+?)(?:\.git)?/?\z},
-      %r{\A(?:[^@/]+@)?([^/:]+):(?!/)(.+?)(?:\.git)?/?\z},
-    ].freeze
+    URL_FORM = %r{\A(https?|ssh)://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+?)(?:\.git)?/?\z}
+    SCP_FORM = %r{\A(?:[^@/]+@)?([^/:]+):(?!/)(.+?)(?:\.git)?/?\z}
+    # ssh.github.com is GitHub's SSH endpoint on port 443, for networks that block port 22.
+    GITHUB_HOSTS = %w[github.com ssh.github.com].freeze
     GITLAB_STATES = { "opened" => :open, "locked" => :open, "merged" => :merged,
                       "closed" => :closed }.freeze
     GITLAB_PAGE = 100
@@ -21,11 +21,12 @@ module SweepWorktrees
     OPEN_LIMIT = 5000
 
     def self.parse_remote(url)
-      REMOTE_FORMS.each do |form|
-        match = form.match(url.to_s.strip)
-        return Remote.new(match[1], match[2]) if match
+      text = url.to_s.strip
+      if (match = URL_FORM.match(text))
+        Remote.new(match[2], match[3], match[1] == "ssh")
+      elsif (match = SCP_FORM.match(text))
+        Remote.new(match[1], match[2], true)
       end
-      nil
     end
 
     # An open PR/MR wins; merged and closed ones only match the exact head commit.
@@ -37,10 +38,13 @@ module SweepWorktrees
         prs.find { |pr| pr.state == :closed && pr.head_sha == head }
     end
 
-    def initialize(limit:, runner: Command)
+    # github_hosts: GitHub Enterprise hosts, which would otherwise be taken for GitLab.
+    def initialize(limit:, runner: Command, github_hosts: [])
       @limit = limit
       @runner = runner
+      @github_hosts = github_hosts
       @cache = {}
+      @real_hosts = {}
     end
 
     def pull_requests(remote_url)
@@ -48,21 +52,56 @@ module SweepWorktrees
       key = [remote.host, remote.project]
       return @cache[key] if @cache.key?(key)
 
-      @cache[key] = remote.host == "github.com" ? github(remote) : gitlab(remote)
+      @cache[key] = first_answer(remote) do |target|
+        github?(target.host) ? github(target) : gitlab(target)
+      end
     end
 
     # PRs/MRs holding the commit, for checkouts older than the capped list. A failure
     # finds nothing, which leaves the checkout where the capped list put it.
     def pull_requests_for_commit(remote_url, sha)
       remote = self.class.parse_remote(remote_url) or return []
-      remote.host == "github.com" ? github_for_commit(remote, sha) : gitlab_for_commit(remote, sha)
+      found = first_answer(remote) do |target|
+        github?(target.host) ? github_for_commit(target, sha) : gitlab_for_commit(target, sha)
+      end
+      found || []
     end
 
     private
 
+    def first_answer(remote)
+      targets(remote).each do |target|
+        answer = yield target
+        return answer if answer
+      end
+      nil
+    end
+
+    # An SSH remote may name a Host alias from ~/.ssh/config (a second account, say), so the
+    # host `ssh -G` resolves it to is asked too. The host as written goes first: the resolved
+    # one may be an SSH-only endpoint or an address the CLI doesn't know. gh has no use for
+    # an alias, so a GitHub host is asked alone.
+    def targets(remote)
+      hosts = [remote.host]
+      hosts << (@real_hosts[remote.host] ||= real_host(remote.host)) if remote.ssh
+      github = hosts.find { |host| github?(host) }
+      (github ? [github] : hosts.uniq).map { |host| Remote.new(host, remote.project, remote.ssh) }
+    end
+
+    def real_host(host)
+      res = @runner.run("ssh", "-G", host)
+      (res.ok? && res.out[/^hostname (\S+)$/, 1]) || host
+    end
+
+    def github?(host) = GITHUB_HOSTS.include?(host) || @github_hosts.include?(host)
+
+    # gh reaches github.com by default; an Enterprise host has to be named.
+    def enterprise?(remote) = !GITHUB_HOSTS.include?(remote.host)
+
     def github_for_commit(remote, sha)
-      res = @runner.run("gh", "api", "repos/#{remote.project}/commits/#{sha}/pulls")
-      return [] unless res.ok?
+      host = enterprise?(remote) ? ["--hostname", remote.host] : []
+      res = @runner.run("gh", "api", *host, "repos/#{remote.project}/commits/#{sha}/pulls")
+      return nil unless res.ok?
 
       JSON.parse(res.out).map do |pr|
         state = if pr["state"] == "open" then :open
@@ -73,18 +112,18 @@ module SweepWorktrees
                         source_branch: pr.dig("head", "ref"), url: pr["html_url"])
       end
     rescue JSON::ParserError
-      []
+      nil
     end
 
     def gitlab_for_commit(remote, sha)
       project = URI.encode_www_form_component(remote.project)
       res = @runner.run("glab", "api", "--hostname", remote.host,
                         "projects/#{project}/repository/commits/#{sha}/merge_requests")
-      return [] unless res.ok?
+      return nil unless res.ok?
 
       JSON.parse(res.out).map { |mr| gitlab_mr(mr) }
     rescue JSON::ParserError
-      []
+      nil
     end
 
     def github(remote)
@@ -94,7 +133,8 @@ module SweepWorktrees
     end
 
     def github_list(remote, state, limit)
-      res = @runner.run("gh", "pr", "list", "--repo", remote.project, "--state", state,
+      repo = enterprise?(remote) ? "#{remote.host}/#{remote.project}" : remote.project
+      res = @runner.run("gh", "pr", "list", "--repo", repo, "--state", state,
                         "--limit", limit.to_s, "--json", "number,state,headRefName,headRefOid,url")
       return nil unless res.ok?
 
