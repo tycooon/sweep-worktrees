@@ -126,13 +126,16 @@ module SweepWorktrees
     def recheck(facts, repo, prs)
       builder = builder!
       fresh = builder.cheap(Checkout.new(path: facts.path, kind: facts.kind))
-      builder.complete(fresh, repo, prs, measure_idle: false) unless builder.guarded_cheaply?(fresh)
+      unless builder.guarded_cheaply?(fresh)
+        builder.complete(fresh, repo, prs, measure_idle: false)
+        # prs is only the capped list; a PR found by commit still speaks for an unchanged HEAD.
+        fresh.head_known ||= facts.head_known if fresh.head == facts.head
+      end
       guarded = Rules.guard(fresh)
       return guarded.first if guarded
 
-      "it changed since it was checked" unless %i[head branch dirt].all? do |key|
-        fresh[key] == facts[key]
-      end
+      changed = %i[head branch dirt].any? { |key| fresh[key] != facts[key] }
+      "it changed since it was checked" if changed
     rescue AppRegistry::Unreadable, Processes::Unavailable => error
       error.message
     end

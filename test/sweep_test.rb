@@ -225,6 +225,24 @@ class SweepTest < Minitest::Test
     refute branch?(@main, "claude/old")
   end
 
+def test_a_detached_review_checkout_found_only_by_its_commit_goes
+  path = File.join(@root, "proj", "old-review")
+  git(@main, "worktree", "add", "-q", "--detach", path, "origin/master")
+  head = commit(path, "fork-change.txt")
+  age(path, 30)
+  github("acme/proj", [])
+  closed = { "number" => 8, "state" => "closed", "merged_at" => nil,
+             "head" => { "sha" => head, "ref" => "fork-branch" },
+             "html_url" => "https://example.com/pr/8" }
+  File.write(File.join(@fixtures, "gh-api-repos_acme_proj_commits_#{head}_pulls.json"),
+             JSON.generate([closed]))
+
+  out, status = sweep
+
+  assert_equal 0, status, out
+  refute File.exist?(path), out
+end
+
   def test_a_dirty_merged_worktree_waits_under_the_idle_window
     path, head = add_worktree(@main, "recent")
     File.write(File.join(path, "scratch.txt"), "notes\n")
