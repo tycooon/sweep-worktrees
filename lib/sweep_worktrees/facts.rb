@@ -73,7 +73,7 @@ module SweepWorktrees
       facts.forge_ok = !prs.nil?
       match_pull_requests(facts, prs || [])
       facts.head_in_default = repo.in_default?(facts.head)
-      clone_facts(facts, prs || []) if facts.kind == :clone
+      clone_facts(facts, repo, prs || []) if facts.kind == :clone
       facts.local_env_files = local_env_files(facts.path, repo.dir) if facts.kind == :worktree
       facts
     rescue FactError, SystemCallError => error
@@ -104,12 +104,11 @@ module SweepWorktrees
       facts.head_on_ref = facts.branch ? true : on_ref?(path, facts.head)
     end
 
-    def clone_facts(facts, prs)
+    def clone_facts(facts, repo, prs)
       path = facts.path
-      worktrees = Command.git!(path, "worktree", "list", "--porcelain")
-      facts.hosted_worktrees = worktrees.scan(/^worktree /).size - 1
+      facts.hosted_worktrees = repo.worktrees.size - 1
       facts.stash_count = Command.git!(path, "stash", "list").lines.size
-      facts.unpushed_refs = unpushed_refs(path, prs)
+      facts.unpushed_refs = unpushed_refs(path, prs) - repo.pretended.branches
       facts.precious_ignored = precious_ignored(path)
     end
 

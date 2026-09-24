@@ -89,6 +89,16 @@ class SweepTest < Minitest::Test
     File.write(File.join(@fixtures, "gh-#{slug.tr('/', '_')}.json"), JSON.generate(data))
   end
 
+  def github_by_commit(slug, sha, prs)
+    data = prs.map do |pr|
+      { "number" => pr.number, "state" => pr.state == :open ? "open" : "closed",
+        "merged_at" => ("2026-06-01T00:00:00Z" if pr.state == :merged),
+        "head" => { "sha" => pr.head_sha, "ref" => pr.source_branch }, "html_url" => pr.url }
+    end
+    file = "gh-api-repos_#{slug.tr('/', '_')}_commits_#{sha}_pulls.json"
+    File.write(File.join(@fixtures, file), JSON.generate(data))
+  end
+
   def gitlab(project, prs)
     states = { open: "opened", merged: "merged", closed: "closed" }
     data = prs.map do |pr|
@@ -214,11 +224,7 @@ class SweepTest < Minitest::Test
     File.write(File.join(path, "scratch.txt"), "notes\n")
     age(path, 30)
     github("acme/proj", [])
-    merged = { "number" => 7, "state" => "closed", "merged_at" => "2026-06-01T00:00:00Z",
-               "head" => { "sha" => head, "ref" => "claude/old" },
-               "html_url" => "https://example.com/pr/7" }
-    File.write(File.join(@fixtures, "gh-api-repos_acme_proj_commits_#{head}_pulls.json"),
-               JSON.generate([merged]))
+    github_by_commit("acme/proj", head, [pull_request(7, :merged, head, branch: "claude/old")])
 
     out, status = sweep
 
@@ -234,11 +240,7 @@ class SweepTest < Minitest::Test
     head = commit(path, "fork-change.txt")
     age(path, 30)
     github("acme/proj", [])
-    closed = { "number" => 8, "state" => "closed", "merged_at" => nil,
-               "head" => { "sha" => head, "ref" => "fork-branch" },
-               "html_url" => "https://example.com/pr/8" }
-    File.write(File.join(@fixtures, "gh-api-repos_acme_proj_commits_#{head}_pulls.json"),
-               JSON.generate([closed]))
+    github_by_commit("acme/proj", head, [pull_request(8, :closed, head, branch: "fork-branch")])
 
     out, status = sweep
 
@@ -430,6 +432,114 @@ class SweepTest < Minitest::Test
     assert_match(/keep #{Regexp.escape(fresh)}: merged .*, idle < 14d/, out)
   end
 
+  def test_a_dry_run_shows_the_clone_that_goes_with_its_last_worktree
+    clone = make_repo("proj", dest: File.join(@root, "review-clone"))
+    worktree = File.join(@root, "review-wt")
+    git(clone, "worktree", "add", "-q", "-b", "claude/review", worktree, "origin/master")
+    github("acme/proj", [pull_request(1, :merged, commit(worktree, "review.txt"))])
+    age(clone, 20)
+
+    out, status = sweep("--dry-run")
+
+    assert_equal 0, status, out
+    assert File.exist?(worktree), out
+    assert File.exist?(clone), out
+    assert_includes out, "DRY-RUN: remove #{worktree} ("
+    assert_includes out, "DRY-RUN: delete clone #{clone} ("
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(worktree), out
+    refute File.exist?(clone), out
+  end
+
+  def test_the_branch_deleted_with_the_last_worktree_does_not_keep_the_clone_in_a_dry_run
+    clone = make_repo("proj", dest: File.join(@root, "old-clone"))
+    worktree = File.join(@root, "old-wt")
+    git(clone, "worktree", "add", "-q", "-b", "claude/old", worktree, "origin/master")
+    head = commit(worktree, "old.txt")
+    [worktree, clone].each { |path| age(path, 30) }
+    github("acme/proj", [])
+    github_by_commit("acme/proj", head, [pull_request(7, :merged, head, branch: "claude/old")])
+
+    out, status = sweep("--dry-run")
+
+    assert_equal 0, status, out
+    assert_includes out, "DRY-RUN: delete branch claude/old in #{clone}"
+    assert_includes out, "DRY-RUN: delete clone #{clone} ("
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(clone), out
+  end
+
+  def test_a_dry_run_leaves_out_the_stale_registrations_prune_would_drop
+    clone = make_repo("proj", dest: File.join(@root, "prune-clone"))
+    worktree = File.join(@root, "done-wt")
+    git(clone, "worktree", "add", "-q", "-b", "claude/done", worktree, "origin/master")
+    github("acme/proj", [pull_request(1, :merged, commit(worktree, "done.txt"))])
+    # Made after the commit, or git's auto maintenance prunes it before the sweep runs.
+    gone = File.join(@root, "gone-wt")
+    git(clone, "worktree", "add", "-q", "-b", "claude/gone", gone, "origin/master")
+    FileUtils.rm_rf(gone)
+    git(clone, "config", "gc.worktreePruneExpire", "now")
+    age(clone, 20)
+
+    out, status = sweep("--dry-run")
+
+    assert_equal 0, status, out
+    assert registered?(gone, clone), out
+    assert_includes out, "DRY-RUN: delete clone #{clone} ("
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(clone), out
+  end
+
+  def test_a_dry_run_reconnects_a_moved_worktree_before_judging_its_clone
+    clone = make_repo("proj", dest: File.join(@root, "moved-clone"))
+    worktree = File.join(@root, "old", "wt")
+    git(clone, "worktree", "add", "-q", "-b", "claude/wt", worktree, "origin/master")
+    github("acme/proj", [pull_request(1, :merged, commit(worktree, "wt.txt"))])
+    FileUtils.mv(File.join(@root, "old"), File.join(@root, "new"))
+    age(clone, 20)
+
+    out, status = sweep("--dry-run")
+
+    assert_equal 0, status, out
+    assert registered?(worktree, clone), out
+    assert_includes out, "DRY-RUN: reconnected moved worktree #{File.join(@root, 'new', 'wt')}\n"
+    assert_includes out, "DRY-RUN: delete clone #{clone} ("
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(clone), out
+  end
+
+  def test_a_dry_run_never_prunes_a_registration_it_would_reconnect
+    clone = make_repo("proj", dest: File.join(@root, "moved-clone"))
+    git(clone, "worktree", "add", "-q", "-b", "claude/wip", File.join(@root, "old", "wip"),
+        "origin/master")
+    github("acme/proj", [pull_request(2, :open, "0" * 40, branch: "claude/wip")])
+    FileUtils.mv(File.join(@root, "old"), File.join(@root, "new"))
+    git(clone, "config", "gc.worktreePruneExpire", "now")
+    age(clone, 20)
+
+    out, status = sweep("--dry-run", "--verbose")
+
+    assert_equal 0, status, out
+    assert_includes out, "keep #{clone}: hosts 1 worktree(s)"
+
+    out, status = sweep("--verbose")
+
+    assert_equal 0, status, out
+    assert_includes out, "keep #{clone}: hosts 1 worktree(s)"
+  end
+
   def test_a_process_that_appears_after_classification_stops_the_removal
     path, head = add_worktree(@main, "raced")
     github("acme/proj", [pull_request(1, :merged, head)])
@@ -523,8 +633,8 @@ class SweepTest < Minitest::Test
     assert File.exist?(path), out
   end
 
-  def registered?(path)
-    git(@main, "worktree", "list", "--porcelain").include?("worktree #{path}\n")
+  def registered?(path, repo = @main)
+    git(repo, "worktree", "list", "--porcelain").include?("worktree #{path}\n")
   end
 
   def admin_dir(path) = git(path, "rev-parse", "--path-format=absolute", "--git-dir")
@@ -684,12 +794,18 @@ class SweepTest < Minitest::Test
     assert File.exist?(recent)
   end
 
-  def test_leftovers_over_the_cap_keep_the_worktree_and_warn
+  def test_leftovers_over_the_cap_keep_the_worktree_and_warn_in_a_dry_run_too
     path, head = add_worktree(@main, "big")
     File.write(File.join(path, "dump.bin"), "x" * ((1024 * 1024) + 1))
     age(path, 8)
     github("acme/proj", [pull_request(1, :merged, head)])
     write_config(salvage_max_mb: 1)
+
+    out, status = sweep("--dry-run")
+
+    assert_equal 1, status, out
+    assert_match(/over the 1 MB cap/, out)
+    refute_includes out, "DRY-RUN: remove"
 
     out, status = sweep
 
