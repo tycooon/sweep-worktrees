@@ -133,13 +133,11 @@ module SweepWorktrees
     end
 
     def prunable(repo, expire)
-      res = Command.git(repo.dir, "worktree", "list", "--porcelain", expire)
-      return unless res.ok?
-
-      res.out.split("\n\n").filter_map do |block|
-        lines = block.lines.map(&:chomp)
-        lines.first.delete_prefix("worktree ") if lines.any? { |line| line.start_with?("prunable") }
+      repo.worktrees(expire).filter_map do |path, attributes|
+        path if attributes.any? { |line| line.start_with?("prunable") }
       end
+    rescue FactError
+      nil
     end
 
     def stopped?(facts, repo, prs)
@@ -166,6 +164,7 @@ module SweepWorktrees
       raise Refused, "refusing to remove the main checkout #{path}" if path == repo.dir
       return false unless @dry_run || git_worktree_remove(repo.dir, path, force: verdict.force)
 
+      repo.pretended.worktrees << path if @dry_run
       removed = done(:removed, "remove #{facts.path} (#{verdict.reason})")
       delete_branch(repo, facts) if verdict.delete_branch
       removed
@@ -196,7 +195,9 @@ module SweepWorktrees
         return @log.warn("kept branch #{branch} in #{repo.dir}: its tip moved")
       end
 
-      unless @dry_run
+      if @dry_run
+        repo.pretended.branches << branch
+      else
         res = Command.git(repo.dir, "branch", "-D", branch)
         unless res.ok?
           return @log.warn("could not delete branch #{branch} in #{repo.dir}: #{res.err.strip}")

@@ -1,9 +1,13 @@
 # frozen_string_literal: true
 
 module SweepWorktrees
+  # Worktree paths and branch names a dry run has reported removing. A real run has removed them
+  # by the time the repository's clone is judged, so the clone's facts leave them out.
+  Pretended = Struct.new(:worktrees, :branches)
+
   # A repository, addressed by its main checkout or by a standalone clone's own dir.
   class Repo
-    attr_reader :dir
+    attr_reader :dir, :pretended
 
     def self.of(path)
       common = common_dir_of(path)
@@ -16,6 +20,7 @@ module SweepWorktrees
 
     def initialize(dir)
       @dir = dir
+      @pretended = Pretended.new([], [])
     end
 
     def common_dir
@@ -23,6 +28,14 @@ module SweepWorktrees
     end
 
     def name = File.basename(dir)
+
+    # `git worktree list --porcelain` as [path, attribute lines] pairs, the main checkout first.
+    def worktrees(*options)
+      Command.git!(dir, "worktree", "list", "--porcelain", *options).split("\n\n").map do |entry|
+        path, *attributes = entry.lines(chomp: true)
+        [path.delete_prefix("worktree "), attributes]
+      end
+    end
 
     def origin_url
       return @origin_url if defined?(@origin_url)

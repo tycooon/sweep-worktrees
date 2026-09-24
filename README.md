@@ -23,7 +23,7 @@ It looks at every checkout one or two levels under the root: `<root>/<project>/<
 
 Open PRs/MRs are always fetched in full. Merged and closed ones are capped at the 500 most recent; a checkout idle for 7+ days that matches nothing in that window gets one extra lookup by its own commit, so older merged PRs are still recognized.
 
-Standalone clones follow the same table with more care, since deleting a clone deletes its repository: nothing goes before 14 idle days, and a clone stays while it hosts worktrees, holds a stash, has a branch or tag with commits on no remote, or holds git-ignored files other than the usual build output, dependencies, caches, logs and editor or agent folders (a `.env`, say).
+Standalone clones follow the same table with more care, since deleting a clone deletes its repository: nothing goes before 14 idle days, and a clone stays while it hosts worktrees, holds a stash, has a branch or tag with commits on no remote, or holds git-ignored files other than the usual build output, dependencies, caches, logs and editor or agent folders (a `.env`, say). A clone's worktrees under the root are judged before the clone, so it can go in the same run as the last of them; `--dry-run` shows that too.
 
 Before a repository's worktrees are judged, any that moved within the root are reconnected to their registration. Afterwards, `git worktree prune` drops the registrations of deleted ones, but no sooner than git's own gc would (`gc.worktreePruneExpire`, 3 months by default): a worktree moved elsewhere with a plain `mv` looks just like a deleted one. It also waits while any missing worktree of that repository lies outside the root. To move a worktree for good, use `git worktree move`.
 
