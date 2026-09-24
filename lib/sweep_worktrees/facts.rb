@@ -106,8 +106,7 @@ module SweepWorktrees
 
     def clone_facts(facts, repo, prs)
       path = facts.path
-      linked = repo.worktrees.drop(1).map(&:first)
-      facts.hosted_worktrees = (linked - repo.pretended.worktrees).size
+      facts.hosted_worktrees = repo.worktrees.size - 1
       facts.stash_count = Command.git!(path, "stash", "list").lines.size
       facts.unpushed_refs = unpushed_refs(path, prs) - repo.pretended.branches
       facts.precious_ignored = precious_ignored(path)

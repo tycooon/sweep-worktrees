@@ -1,9 +1,19 @@
 # frozen_string_literal: true
 
 module SweepWorktrees
-  # Worktree paths and branch names a dry run has reported removing. A real run has removed them
-  # by the time the repository's clone is judged, so the clone's facts leave them out.
-  Pretended = Struct.new(:worktrees, :branches)
+  # What a dry run has reported doing to a repository: worktree registrations dropped (removed
+  # or pruned, by path), branches deleted, and registrations reconnected (old path to new).
+  # A real run has done all that before it prunes or judges the clone, so a dry run must too.
+  Pretended = Struct.new(:worktrees, :branches, :moved, keyword_init: true) do
+    # A registration as a real run would have left it, or nil once it is gone.
+    def apply(path, prunable)
+      if (target = moved[path])
+        path = target
+        prunable = false
+      end
+      [path, prunable] unless worktrees.include?(path)
+    end
+  end
 
   # A repository, addressed by its main checkout or by a standalone clone's own dir.
   class Repo
@@ -20,7 +30,7 @@ module SweepWorktrees
 
     def initialize(dir)
       @dir = dir
-      @pretended = Pretended.new([], [])
+      @pretended = Pretended.new(worktrees: [], branches: [], moved: {})
     end
 
     def common_dir
@@ -29,11 +39,14 @@ module SweepWorktrees
 
     def name = File.basename(dir)
 
-    # `git worktree list --porcelain` as [path, attribute lines] pairs, the main checkout first.
+    # Registered worktrees as [path, prunable] pairs, the main checkout first. Under --dry-run,
+    # as a real run would have left them by now.
     def worktrees(*options)
-      Command.git!(dir, "worktree", "list", "--porcelain", *options).split("\n\n").map do |entry|
+      listing = Command.git!(dir, "worktree", "list", "--porcelain", *options)
+      listing.split("\n\n").filter_map do |entry|
         path, *attributes = entry.lines(chomp: true)
-        [path.delete_prefix("worktree "), attributes]
+        prunable = attributes.any? { |line| line.start_with?("prunable") }
+        pretended.apply(path.delete_prefix("worktree "), prunable)
       end
     end
 

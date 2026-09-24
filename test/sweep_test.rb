@@ -475,6 +475,71 @@ class SweepTest < Minitest::Test
     refute File.exist?(clone), out
   end
 
+  def test_a_dry_run_leaves_out_the_stale_registrations_prune_would_drop
+    clone = make_repo("proj", dest: File.join(@root, "prune-clone"))
+    worktree = File.join(@root, "done-wt")
+    git(clone, "worktree", "add", "-q", "-b", "claude/done", worktree, "origin/master")
+    github("acme/proj", [pull_request(1, :merged, commit(worktree, "done.txt"))])
+    # Made after the commit, or git's auto maintenance prunes it before the sweep runs.
+    gone = File.join(@root, "gone-wt")
+    git(clone, "worktree", "add", "-q", "-b", "claude/gone", gone, "origin/master")
+    FileUtils.rm_rf(gone)
+    git(clone, "config", "gc.worktreePruneExpire", "now")
+    age(clone, 20)
+
+    out, status = sweep("--dry-run")
+
+    assert_equal 0, status, out
+    assert registered?(gone, clone), out
+    assert_includes out, "DRY-RUN: delete clone #{clone} ("
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(clone), out
+  end
+
+  def test_a_dry_run_reconnects_a_moved_worktree_before_judging_its_clone
+    clone = make_repo("proj", dest: File.join(@root, "moved-clone"))
+    worktree = File.join(@root, "old", "wt")
+    git(clone, "worktree", "add", "-q", "-b", "claude/wt", worktree, "origin/master")
+    github("acme/proj", [pull_request(1, :merged, commit(worktree, "wt.txt"))])
+    FileUtils.mv(File.join(@root, "old"), File.join(@root, "new"))
+    age(clone, 20)
+
+    out, status = sweep("--dry-run")
+
+    assert_equal 0, status, out
+    assert registered?(worktree, clone), out
+    assert_includes out, "DRY-RUN: reconnected moved worktree #{File.join(@root, 'new', 'wt')}\n"
+    assert_includes out, "DRY-RUN: delete clone #{clone} ("
+
+    out, status = sweep
+
+    assert_equal 0, status, out
+    refute File.exist?(clone), out
+  end
+
+  def test_a_dry_run_never_prunes_a_registration_it_would_reconnect
+    clone = make_repo("proj", dest: File.join(@root, "moved-clone"))
+    git(clone, "worktree", "add", "-q", "-b", "claude/wip", File.join(@root, "old", "wip"),
+        "origin/master")
+    github("acme/proj", [pull_request(2, :open, "0" * 40, branch: "claude/wip")])
+    FileUtils.mv(File.join(@root, "old"), File.join(@root, "new"))
+    git(clone, "config", "gc.worktreePruneExpire", "now")
+    age(clone, 20)
+
+    out, status = sweep("--dry-run", "--verbose")
+
+    assert_equal 0, status, out
+    assert_includes out, "keep #{clone}: hosts 1 worktree(s)"
+
+    out, status = sweep("--verbose")
+
+    assert_equal 0, status, out
+    assert_includes out, "keep #{clone}: hosts 1 worktree(s)"
+  end
+
   def test_a_process_that_appears_after_classification_stops_the_removal
     path, head = add_worktree(@main, "raced")
     github("acme/proj", [pull_request(1, :merged, head)])
@@ -568,8 +633,8 @@ class SweepTest < Minitest::Test
     assert File.exist?(path), out
   end
 
-  def registered?(path)
-    git(@main, "worktree", "list", "--porcelain").include?("worktree #{path}\n")
+  def registered?(path, repo = @main)
+    git(repo, "worktree", "list", "--porcelain").include?("worktree #{path}\n")
   end
 
   def admin_dir(path) = git(path, "rev-parse", "--path-format=absolute", "--git-dir")
@@ -729,12 +794,18 @@ class SweepTest < Minitest::Test
     assert File.exist?(recent)
   end
 
-  def test_leftovers_over_the_cap_keep_the_worktree_and_warn
+  def test_leftovers_over_the_cap_keep_the_worktree_and_warn_in_a_dry_run_too
     path, head = add_worktree(@main, "big")
     File.write(File.join(path, "dump.bin"), "x" * ((1024 * 1024) + 1))
     age(path, 8)
     github("acme/proj", [pull_request(1, :merged, head)])
     write_config(salvage_max_mb: 1)
+
+    out, status = sweep("--dry-run")
+
+    assert_equal 1, status, out
+    assert_match(/over the 1 MB cap/, out)
+    refute_includes out, "DRY-RUN: remove"
 
     out, status = sweep
 

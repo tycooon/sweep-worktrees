@@ -166,6 +166,8 @@ The desktop app keeps its own pool of worktrees and reuses idle ones for new ses
 
 Each run prints one line per action, warnings prefixed with `warn:`, and a summary. `--verbose` also lists every kept checkout and why. The exit code is 0 for a clean run, 1 if anything warned or another run still holds the lock, and 2 for bad usage or config.
 
+A dry run changes nothing and prefixes each action with `DRY-RUN:`, but otherwise goes through the same steps: it makes the same checks, salvage's size and patch checks included, and judges each checkout as if the reconnects, removals and prunes before it had happened.
+
 ## Development
 
 ```bash

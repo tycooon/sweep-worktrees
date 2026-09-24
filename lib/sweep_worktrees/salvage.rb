@@ -29,20 +29,19 @@ module SweepWorktrees
     # Returns the tarball path. On Failed the checkout must stay.
     def write(facts, repo_name:, remote_url:, reason:)
       path = facts.path
-      untracked = untracked_files(path)
-      plans = plans_files(path)
-      check_size!(path, untracked, plans)
       target = File.join(@config.salvage_dir, repo_name, "#{tarball_name(path)}.tar.gz")
-      Dir.mktmpdir("sweep-salvage") do |stage|
+      staged(path) do |stage, untracked, plans|
         File.write(File.join(stage, "MANIFEST"), manifest(facts, repo_name, remote_url, reason))
-        stage_changes(path, stage)
         copy(path, untracked, File.join(stage, "untracked"))
         copy(File.join(path, ".plans"), plans, File.join(stage, "plans"))
         pack(stage, target)
       end
       target
-    rescue FactError, SystemCallError => error
-      raise Failed, error.message
+    end
+
+    # The checks of write without the tarball: a dry run must keep what a real run keeps.
+    def check(facts)
+      staged(facts.path) { nil }
     end
 
     # Only tarballs this tool wrote, so a salvage_dir shared with other archives stays intact.
@@ -53,6 +52,18 @@ module SweepWorktrees
     end
 
     private
+
+    def staged(path)
+      untracked = untracked_files(path)
+      plans = plans_files(path)
+      check_size!(path, untracked, plans)
+      Dir.mktmpdir("sweep-salvage") do |stage|
+        stage_changes(path, stage)
+        yield stage, untracked, plans
+      end
+    rescue FactError, SystemCallError => error
+      raise Failed, error.message
+    end
 
     # The path under the root keeps same-named checkouts of one repo apart within a run.
     def tarball_name(path)

@@ -44,13 +44,13 @@ module SweepWorktrees
     # but it also rewrites the `.git` file of whatever sits at any other registered path,
     # another repository's worktree included. This writes only this repository's admin dirs.
     def reconnect(repo, paths)
-      return if @dry_run || paths.empty?
+      return if paths.empty?
 
       admin_root = File.realpath(File.join(repo.common_dir, "worktrees"))
       paths.group_by { |path| admin_dir(path) }.each do |admin, claimants|
         next unless admin && claimants.one? && File.dirname(admin) == admin_root
 
-        relink(admin, claimants.first)
+        relink(repo, admin, claimants.first)
       end
     rescue FactError, SystemCallError => error
       @log.warn("could not reconnect moved worktrees of #{repo.dir}: #{error.message}")
@@ -60,14 +60,13 @@ module SweepWorktrees
     # as git's own gc would (gc.worktreePruneExpire). `prune` has no path filter, so it also
     # waits while any expired entry lies outside the root.
     def prune(repo)
-      return if @dry_run
-
       expire = "--expire=#{prune_expiry(repo)}"
       stale = prunable(repo, expire)
       return if stale.nil? || stale.empty?
 
       outside = stale.reject { |path| path.start_with?("#{@config.worktrees_root}/") }
       return @log.verbose("left missing worktrees to git gc: #{outside.join(', ')}") if outside.any?
+      return repo.pretended.worktrees.concat(stale) if @dry_run
 
       res = Command.git(repo.dir, "worktree", "prune", expire)
       @log.warn("git worktree prune failed in #{repo.dir}: #{res.err.strip}") unless res.ok?
@@ -113,18 +112,24 @@ module SweepWorktrees
 
     # Only a registration whose folder is gone moves: one that still resolves belongs to the
     # original, and this folder is a copy.
-    def relink(admin, path)
+    def relink(repo, admin, path)
       file = File.join(admin, "gitdir")
       registered = File.read(file).strip
-      return if File.exist?(File.expand_path(registered, admin))
+      old = File.expand_path(registered, admin)
+      return if File.exist?(old)
 
-      target = File.join(File.realpath(path), ".git")
-      # worktree.useRelativePaths writes registrations relative to the admin dir.
-      unless File.absolute_path?(registered)
-        target = Pathname(target).relative_path_from(admin).to_s
+      if @dry_run
+        repo.pretended.moved[File.dirname(old)] = path
+      else
+        File.write(file, "#{registration(admin, registered, path)}\n")
       end
-      File.write(file, "#{target}\n")
-      @log.info("reconnected moved worktree #{path}")
+      note("reconnected moved worktree #{path}")
+    end
+
+    # worktree.useRelativePaths writes registrations relative to the admin dir.
+    def registration(admin, registered, path)
+      target = File.join(File.realpath(path), ".git")
+      File.absolute_path?(registered) ? target : Pathname(target).relative_path_from(admin).to_s
     end
 
     def prune_expiry(repo)
@@ -133,9 +138,7 @@ module SweepWorktrees
     end
 
     def prunable(repo, expire)
-      repo.worktrees(expire).filter_map do |path, attributes|
-        path if attributes.any? { |line| line.start_with?("prunable") }
-      end
+      repo.worktrees(expire).filter_map { |path, prunable| path if prunable }
     rescue FactError
       nil
     end
@@ -147,6 +150,7 @@ module SweepWorktrees
     end
 
     def salvage(facts, verdict, repo)
+      @salvage.check(facts) if @dry_run
       tarball = @dry_run ? "a tarball" : write_tarball(facts, verdict, repo)
       done(:salvaged, "salvage #{facts.path} to #{tarball}")
     rescue Salvage::Failed => error
@@ -219,9 +223,11 @@ module SweepWorktrees
     end
 
     def done(key, message)
-      @log.info(@dry_run ? "DRY-RUN: #{message}" : message)
+      note(message)
       @counts[key] += 1
     end
+
+    def note(message) = @log.info(@dry_run ? "DRY-RUN: #{message}" : message)
 
     def inside_root!(path)
       root = @config.worktrees_root

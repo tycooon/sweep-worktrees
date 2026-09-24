@@ -51,6 +51,18 @@ class SalvageTest < Minitest::Test
     assert_empty Dir.glob(File.join(@tmp, "salvage", "**", "*.tar.gz*"))
   end
 
+  def test_check_refuses_what_write_would_and_writes_nothing
+    path, = add_worktree(make_repo("app"), "feature")
+    File.write(File.join(path, "dump.bin"), "x" * 10)
+
+    error = assert_raises(SweepWorktrees::Salvage::Failed) do
+      SweepWorktrees::Salvage.new(config(salvage_max_mb: 0)).check(build_facts(path))
+    end
+    assert_match(/over the 0 MB cap/, error.message)
+    SweepWorktrees::Salvage.new(config).check(build_facts(path))
+    refute File.exist?(File.join(@tmp, "salvage"))
+  end
+
   def test_the_patch_applies_whatever_the_diff_config
     main = make_repo("app")
     path, head = add_worktree(main, "feature")
