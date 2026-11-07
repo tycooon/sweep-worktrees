@@ -11,6 +11,13 @@ module SweepWorktrees
     class Failed < StandardError
     end
 
+    # A leftover entry the size cap kept out of the tarball. `kind` is "untracked" or "plans".
+    Dropped = Struct.new(:kind, :rel, :bytes) do
+      def label = "#{kind}/#{rel}"
+      def mb = bytes.to_f / MB
+    end
+    Result = Struct.new(:tarball, :dropped)
+
     MB = 1024 * 1024
     DAY = 86_400
     TARBALL = /-\d{8}-\d{4}\.tar\.gz\z/
@@ -26,20 +33,23 @@ module SweepWorktrees
       @now = now
     end
 
-    # Returns the tarball path. On Failed the checkout must stay.
+    # Returns a Result: the tarball path and the leftovers dropped to fit the cap.
+    # On Failed the checkout must stay.
     def write(facts, repo_name:, remote_url:, reason:)
       path = facts.path
       target = File.join(@config.salvage_dir, repo_name, "#{tarball_name(path)}.tar.gz")
-      staged(path) do |stage, untracked, plans|
-        File.write(File.join(stage, "MANIFEST"), manifest(facts, repo_name, remote_url, reason))
+      dropped = staged(path) do |stage, untracked, plans, left_out|
+        File.write(File.join(stage, "MANIFEST"),
+                   manifest(facts, repo_name, remote_url, reason, left_out))
         copy(path, untracked, File.join(stage, "untracked"))
         copy(File.join(path, ".plans"), plans, File.join(stage, "plans"))
         pack(stage, target)
       end
-      target
+      Result.new(target, dropped)
     end
 
     # The checks of write without the tarball: a dry run must keep what a real run keeps.
+    # Returns the entries write would drop.
     def check(facts)
       staged(facts.path) { nil }
     end
@@ -56,11 +66,14 @@ module SweepWorktrees
     def staged(path)
       untracked = untracked_files(path)
       plans = plans_files(path)
-      check_size!(path, untracked, plans)
+      dropped = oversized(path, untracked, plans)
+      untracked -= dropped.select { |entry| entry.kind == "untracked" }.map(&:rel)
+      plans -= dropped.select { |entry| entry.kind == "plans" }.map(&:rel)
       Dir.mktmpdir("sweep-salvage") do |stage|
         stage_changes(path, stage)
-        yield stage, untracked, plans
+        yield stage, untracked, plans, dropped
       end
+      dropped
     rescue FactError, SystemCallError => error
       raise Failed, error.message
     end
@@ -76,13 +89,24 @@ module SweepWorktrees
       listing.split("\0").map { |rel| rel.chomp("/") }
     end
 
-    def check_size!(path, untracked, plans)
-      size = untracked.sum { |rel| bytes(File.join(path, rel)) } +
-             plans.sum { |rel| bytes(File.join(path, ".plans", rel)) }
-      cap = @config.salvage_max_mb
-      return if size <= cap * MB
+    # The largest entries, dropped until the rest fits the cap. Each entry is measured once.
+    def oversized(path, untracked, plans)
+      entries = untracked.map { |rel| Dropped.new("untracked", rel, bytes(File.join(path, rel))) } +
+                plans.map { |rel| Dropped.new("plans", rel, bytes(File.join(path, ".plans", rel))) }
+      left = entries.sum(&:bytes)
+      limit = @config.salvage_max_mb * MB
+      return [] if left <= limit
 
-      raise Failed, "leftovers are #{(size.to_f / MB).ceil} MB, over the #{cap} MB cap"
+      # "untracked" sorts before "plans" only by this explicit rank.
+      ranked = entries.sort_by do |entry|
+        [-entry.bytes, entry.kind == "untracked" ? 0 : 1, entry.rel]
+      end
+      ranked.take_while do |entry|
+        next false if left <= limit
+
+        left -= entry.bytes
+        true
+      end
     end
 
     # A patch that doesn't reverse-apply to the checkout it came from would not restore it either.
@@ -141,8 +165,17 @@ module SweepWorktrees
       FileUtils.rm_f(tmp) if tmp
     end
 
-    def manifest(facts, repo_name, remote_url, reason)
-      <<~MANIFEST + facts.dirt
+    def dropped_section(dropped)
+      return "" if dropped.empty?
+
+      lines = dropped.map do |entry|
+        format("%<label>s  %<mb>.1f", label: entry.label, mb: entry.mb)
+      end
+      "\ndropped (over the #{@config.salvage_max_mb} MB cap):\n#{lines.join("\n")}\n"
+    end
+
+    def manifest(facts, repo_name, remote_url, reason, dropped)
+      <<~MANIFEST + facts.dirt + dropped_section(dropped)
         repo: #{repo_name}
         remote: #{remote_url || '-'}
         path: #{facts.path}
@@ -152,7 +185,7 @@ module SweepWorktrees
         reason: #{reason}
         salvaged at: #{@now.iso8601}
         restore: extract, `git apply changes.patch` on a checkout of head,
-          then copy untracked/ and plans/ back
+          then copy untracked/ and plans/ back (dropped files are not in this tarball)
 
         git status --porcelain:
       MANIFEST

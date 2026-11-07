@@ -794,23 +794,25 @@ class SweepTest < Minitest::Test
     assert File.exist?(recent)
   end
 
-  def test_leftovers_over_the_cap_keep_the_worktree_and_warn_in_a_dry_run_too
+  def test_leftovers_over_the_cap_are_dropped_and_the_checkout_is_removed
     path, head = add_worktree(@main, "big")
     File.write(File.join(path, "dump.bin"), "x" * ((1024 * 1024) + 1))
     age(path, 8)
     github("acme/proj", [pull_request(1, :merged, head)])
     write_config(salvage_max_mb: 1)
 
-    out, status = sweep("--dry-run")
+    dry, status = sweep("--dry-run")
 
-    assert_equal 1, status, out
-    assert_match(/over the 1 MB cap/, out)
-    refute_includes out, "DRY-RUN: remove"
+    assert_equal 0, status, dry
+    assert_includes dry, "DRY-RUN: salvage #{path}: dropped 1 file (1 MB) over the 1 MB cap: " \
+                         "untracked/dump.bin (1.0 MB)"
+    assert File.exist?(path), dry
 
     out, status = sweep
 
-    assert_equal 1, status, out
-    assert File.exist?(path), out
-    assert_match(/over the 1 MB cap/, out)
+    assert_equal 0, status, out
+    refute File.exist?(path), out
+    assert_match(/^.*salvage #{Regexp.escape(path)}: dropped 1 file/, out)
+    assert_includes out, "warnings 0"
   end
 end

@@ -64,7 +64,7 @@ Before a dirty checkout is removed, its leftovers go into `<salvage_dir>/<repo>/
 - `untracked/`: untracked, non-ignored files
 - `plans/`: the checkout's `.plans/` folder, if any. Agents often keep design notes there, git-ignored; it is saved even when the checkout is otherwise clean.
 
-Before anything is removed, the patch is checked to apply back to the checkout and the tarball to list back, and an existing tarball is never overwritten. If any of that fails, or the leftovers exceed the size cap, the checkout stays. Tarballs are deleted after 90 days; other files in `salvage_dir` are left alone.
+Before anything is removed, the patch is checked to apply back to the checkout and the tarball to list back, and an existing tarball is never overwritten. If any of that fails, the checkout stays. Leftovers over the size cap don't keep it: the largest untracked entries and `.plans/` files are dropped until the rest fits, and the dropped ones are listed in the tarball's MANIFEST and in the log (the patch is never dropped). Tarballs are deleted after 90 days; other files in `salvage_dir` are left alone.
 
 To restore: extract the tarball, `git apply changes.patch` on a checkout of the recorded HEAD, and copy `untracked/` and `plans/` back.
 
@@ -104,7 +104,7 @@ sweep-worktrees --dry-run --verbose
 | `dirty_merged_idle_days` | `7` | Idle days before a dirty merged checkout is salvaged and removed |
 | `unmerged_idle_days` | `14` | Idle days before a clean unmerged checkout is removed |
 | `attention_idle_days` | `30` | Idle days after which a dirty checkout is flagged in the summary |
-| `salvage_max_mb` | `200` | Leftovers larger than this keep the checkout |
+| `salvage_max_mb` | `200` | Untracked and `.plans/` leftovers over this are trimmed largest first; dropped ones are listed in MANIFEST and the log (`0` drops them all) |
 | `salvage_retention_days` | `90` | Age at which tarballs are deleted |
 | `forge_lookup_limit` | `500` | How many merged/closed PRs/MRs to fetch per repo |
 | `hooks` | `{}` | Per-repo cleanup commands, see below |
