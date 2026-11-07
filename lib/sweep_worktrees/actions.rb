@@ -150,17 +150,30 @@ module SweepWorktrees
     end
 
     def salvage(facts, verdict, repo)
-      @salvage.check(facts) if @dry_run
-      tarball = @dry_run ? "a tarball" : write_tarball(facts, verdict, repo)
+      tarball, dropped = salvage_result(facts, verdict, repo)
+      note(dropped_line(facts, dropped)) unless dropped.empty?
       done(:salvaged, "salvage #{facts.path} to #{tarball}")
     rescue Salvage::Failed => error
       @log.warn("kept #{facts.path}: salvage failed: #{error.message}")
       false
     end
 
-    def write_tarball(facts, verdict, repo)
-      @salvage.write(facts, repo_name: repo.name, remote_url: repo.origin_url,
-                            reason: verdict.reason)
+    def salvage_result(facts, verdict, repo)
+      return ["a tarball", @salvage.check(facts)] if @dry_run
+
+      result = @salvage.write(facts, repo_name: repo.name, remote_url: repo.origin_url,
+                                     reason: verdict.reason)
+      [result.tarball, result.dropped]
+    end
+
+    def dropped_line(facts, dropped)
+      shown = dropped.first(10).map do |entry|
+        format("%<label>s (%<mb>.1f MB)", label: entry.label, mb: entry.mb)
+      end
+      shown << "and #{dropped.size - 10} more" if dropped.size > 10
+      total = (dropped.sum(&:bytes).to_f / Salvage::MB).round
+      "salvage #{facts.path}: dropped #{dropped.size} #{dropped.size == 1 ? 'file' : 'files'} " \
+        "(#{total} MB) over the #{@config.salvage_max_mb} MB cap: #{shown.join(', ')}"
     end
 
     def remove_worktree(facts, verdict, repo)
